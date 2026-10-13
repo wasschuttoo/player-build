@@ -2,3 +2,4 @@ cache/
 my-*.json
 node_modules/
 .impeccable/
+public/lib/

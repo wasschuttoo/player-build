@@ -461,8 +461,13 @@ const server = http.createServer(async (req, res) => {
     let rel;
     try { rel = url.pathname === '/' ? 'index.html' : decodeURIComponent(url.pathname).replace(/^\/+/, ''); }
     catch { return send(res, 400, 'Bad path', 'text/plain'); }
+    // Shared rating modules live at the repo root; the Pages workflow copies them to public/lib/.
+    const libMatch = /^lib\/(efhub_builder|manager)\.js$/.exec(rel);
+    if (libMatch) return send(res, 200, fs.readFileSync(path.join(ROOT, `${libMatch[1]}.js`), 'utf8').replace(/^#!.*\r?\n/, ''), TYPES['.js']);
     const file = path.resolve(PUBLIC, rel);
     if (!file.startsWith(PUBLIC + path.sep) || !fs.existsSync(file) || !fs.statSync(file).isFile()) return send(res, 404, 'Not found', 'text/plain');
+    // Tell the page a live server is present so it uses /api/* instead of the in-browser engine.
+    if (rel === 'index.html') return send(res, 200, fs.readFileSync(file, 'utf8').replace('<meta name="ba-mode" content="static">', '<meta name="ba-mode" content="server">'), TYPES['.html']);
     send(res, 200, fs.readFileSync(file), TYPES[path.extname(file)] || 'application/octet-stream');
   } catch (e) {
     const status = e.status || 500;

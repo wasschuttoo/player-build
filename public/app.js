@@ -8,7 +8,8 @@ const COACH_IMG = id => `https://efimg.com/efootballhub22/images/coach_cards/${i
 const CARD_IMG = id => `https://efimg.com/efootballhub22/images/mini-cards/mini-cards/${id}_l.png`;
 const CARD_IMG2 = id => `https://efimg.com/efootballhub22/images/player_cards/${id}_l.png`;
 const WIDE = window.matchMedia('(min-width: 960px)');
-const SLOW_NOTE = 'efhub asks for 5 s between requests, so a new card can take a few seconds.';
+const ENGINE = window.BA_ENGINE || null;
+const SLOW_NOTE = ENGINE ? "Cards come from Build Album's library; new ones are added on request." : 'efhub asks for 5 s between requests, so a new card can take a few seconds.';
 
 const S = {
   tactics: [], mult: [], abilities: [], all: [], mine: [],
@@ -37,11 +38,20 @@ const bc = i => `bc-${i % 3 + 1}`;
 // ---------------------------------------------------------------- data
 // The server keeps nothing per visitor. Your team, club, squads and the raw cards they
 // need live in this browser's localStorage and travel inline with each request.
+// On GitHub Pages there is no server: engine.js answers the same /api/* routes in the page.
 const LIMITS = { club: 200, bench: 12, recent: 24 };
 const K = { managers: 'ba.managers', club: 'ba.club', squads: 'ba.squads', recent: 'ba.recent', cards: 'ba.cards', migrated: 'ba.migrated' };
 const fail = (msg, status = 400) => Object.assign(new Error(msg), { status });
+const abortErr = () => Object.assign(new Error('Aborted'), { name: 'AbortError' });
 
 async function netApi(path, { method = 'GET', body, signal } = {}) {
+  if (ENGINE) {
+    if (signal?.aborted) throw abortErr();
+    const u = new URL(path, location.origin);
+    const d = await ENGINE.handle(method, u.pathname, u.searchParams, body);
+    if (signal?.aborted) throw abortErr();
+    return d;
+  }
   let res;
   try {
     res = await fetch(path, {
@@ -250,14 +260,16 @@ async function importLegacy() {
 }
 
 let toastTimer;
-function toast(msg, kind = 'error') {
+function toast(msg, kind = 'error', link = null) {
   const t = $('#toast');
   t.textContent = msg;
+  if (link) t.append(' ', h('a', { href: link.href, target: '_blank', rel: 'noopener' }, link.text));
   t.dataset.kind = kind;
   t.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { t.hidden = true; }, kind === 'error' ? 7000 : 3500);
+  toastTimer = setTimeout(() => { t.hidden = true; }, link ? 15000 : kind === 'error' ? 7000 : 3500);
 }
+const requestLink = e => (e?.needsRequest ? { href: e.requestUrl, text: 'Request it on GitHub' } : null);
 
 const deaccent = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const initials = name => String(name || '?').split(/\s+/).map(w => w.replace(/[^A-Za-z]/g, '')[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || '?';
@@ -371,9 +383,9 @@ async function build({ newPlayer = false, refresh = false } = {}) {
       S.level = S.build.level;
       S.pos = S.build.pos;
       renderLevel();
-      toast(e.message);
+      toast(e.message, 'error', requestLink(e));
     } else {
-      renderError(e.message);
+      renderError(e);
     }
   } finally {
     if (buildCtrl === ctrl) setBusy(false);
@@ -485,11 +497,14 @@ function renderLoading() {
     h('p', { class: 'slot-note', text: SLOW_NOTE })));
 }
 
-function renderError(message) {
+function renderError(err) {
+  const message = typeof err === 'string' ? err : err?.message || 'Something went wrong. Try again.';
   $('#playerSlot').replaceChildren(h('div', { class: 'slot slot-error', role: 'alert' },
-    h('p', { class: 'slot-title', text: "Couldn't load this card" }),
+    h('p', { class: 'slot-title', text: err?.needsRequest ? 'Not in Build Album yet' : "Couldn't load this card" }),
     h('p', { class: 'slot-note', text: message }),
-    h('button', { class: 'btn btn-stick', type: 'button', onclick: () => build({ newPlayer: true }) }, 'Try again')));
+    err?.needsRequest
+      ? h('a', { class: 'btn btn-stick', href: err.requestUrl, target: '_blank', rel: 'noopener' }, 'Request this card on GitHub')
+      : h('button', { class: 'btn btn-stick', type: 'button', onclick: () => build({ newPlayer: true }) }, 'Try again')));
 }
 
 async function renderEmpty() {
@@ -583,7 +598,7 @@ function renderSticker(placing) {
           : null,
         h('p', { class: 'st-links' },
           h('a', { href: `https://efhub.com/players/${encodeURIComponent(c.id)}`, target: '_blank', rel: 'noopener' }, 'Open on efhub'),
-          h('button', { type: 'button', class: 'linkish', onclick: () => build({ refresh: true }) }, 'Refetch card')))));
+          ENGINE ? null : h('button', { type: 'button', class: 'linkish', onclick: () => build({ refresh: true }) }, 'Refetch card')))));
   if (placing) {
     st.classList.add('is-placing');
     st.addEventListener('animationend', () => st.classList.remove('is-placing'), { once: true });
@@ -810,7 +825,7 @@ function resultList(head, items, emptyNote) {
           h('span', { class: 'r-main' },
             h('span', { class: 'r-name', text: it.name }),
             h('span', { class: 'r-meta', text: [it.position, it.team, it.type].filter(Boolean).join(' · ') || `Card id ${it.id}` })),
-          it.cached ? h('span', { class: 'r-tag', text: 'Built before' }) : null))))
+          it.cached ? h('span', { class: 'r-tag', text: ENGINE ? 'In library' : 'Built before' }) : null))))
       : emptyNote ? h('p', { class: 'results-empty', text: emptyNote }) : null,
   ].filter(Boolean);
 }
@@ -823,13 +838,11 @@ function showResults(head, items, emptyNote) {
 }
 
 async function searchHits(q, ctrl) {
-  const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
-  if (!r.ok) throw new Error('search');
-  return r.json();
+  return api(`/api/search?q=${encodeURIComponent(q)}`, { signal: ctrl.signal });
 }
 const hitsHead = (hits, q) => (hits.length ? `${hits.length === 24 ? 'Top 24' : hits.length} card${hits.length === 1 ? '' : 's'} for “${q}”` : `No cards for “${q}”`);
 const SEARCH_EMPTY = 'Try the surname only, or paste the efhub player link.';
-const SEARCH_DOWN = "Couldn't reach the Build Album server. Check your connection, then try again.";
+const SEARCH_DOWN = ENGINE ? "Couldn't reach efhub's player index. Check your connection, then try again." : "Couldn't reach the Build Album server. Check your connection, then try again.";
 
 async function search(q, pickSingle) {
   searchCtrl?.abort();
@@ -1081,7 +1094,7 @@ async function removeManager(m) {
 
 async function refreshManagers(btn) {
   btn.disabled = true;
-  setSheetMsg('Checking efhub for managers… efhub asks for 5 s between requests.');
+  setSheetMsg(ENGINE ? 'Checking efhub for managers…' : 'Checking efhub for managers… efhub asks for 5 s between requests.');
   try {
     const r = await api('/api/managers/refresh', { method: 'POST' });
     await loadManagers();
@@ -1462,7 +1475,7 @@ async function runEvaluate() {
       evaluate(0);
       return;
     }
-    toast(e.message);
+    toast(e.message, 'error', requestLink(e));
   } finally {
     if (SQ.ctrl === ctrl) { SQ.ctrl = null; $('#squad').removeAttribute('aria-busy'); }
   }
@@ -1707,9 +1720,10 @@ function tapAgain(btn, armedText, fn) {
 }
 
 // ---------------------------------------------------------------- club sheet
-function setClubMsg(text, kind = '') {
+function setClubMsg(text, kind = '', err = null) {
   const p = $('#clubMsg');
   p.textContent = text;
+  if (err?.needsRequest) p.append(' ', h('a', { href: err.requestUrl, target: '_blank', rel: 'noopener' }, 'Request it on GitHub'));
   if (kind) p.dataset.kind = kind; else delete p.dataset.kind;
 }
 
@@ -1847,7 +1861,7 @@ async function renderClubList() {
     try {
       opts = await api('/api/squad/slot-options', { method: 'POST', body: { pos, managerId: d.managerId, tactic: d.tactic } });
     } catch (e) {
-      setClubMsg(e.message, 'error');
+      setClubMsg(e.message, 'error', e);
       return;
     } finally {
       list.removeAttribute('aria-busy');
@@ -1927,7 +1941,7 @@ async function removeFromClub(p, btn) {
     $('#clubInput').focus();
   } catch (e) {
     btn.disabled = false;
-    setClubMsg(e.message, 'error');
+    setClubMsg(e.message, 'error', e);
   }
 }
 
@@ -1949,7 +1963,7 @@ async function addToClub(ref, label) {
     if (SQ.open) renderSquad();
     (id && document.querySelector(`#clubList [data-fk="row-${CSS.escape(id)}"]`) || input).focus();
   } catch (e) {
-    setClubMsg(e.message, 'error');
+    setClubMsg(e.message, 'error', e);
     input.focus();
   } finally {
     btn.disabled = false;
@@ -1980,12 +1994,12 @@ async function searchClub(q, focusFirst = false) {
         h('span', { class: 'r-main' },
           h('span', { class: 'r-name', text: r.name }),
           h('span', { class: 'r-meta', text: [r.position, r.team, r.type].filter(Boolean).join(' · ') || `Card id ${r.id}` })),
-        has ? h('span', { class: 'r-tag', text: 'In your club' }) : r.cached ? h('span', { class: 'r-tag', text: 'Quick to add' }) : null));
+        has ? h('span', { class: 'r-tag', text: 'In your club' }) : r.cached ? h('span', { class: 'r-tag', text: ENGINE ? 'In library' : 'Quick to add' }) : null));
     }) : [h('li', { class: 'result-none', text: `No cards match “${q}”. Paste the efhub link instead.` })]));
     ul.hidden = false;
     if (focusFirst) ul.querySelector('button:not([disabled])')?.focus();
   } catch (e) {
-    if (e.name !== 'AbortError') setClubMsg(e.message, 'error');
+    if (e.name !== 'AbortError') setClubMsg(e.message, 'error', e);
   }
 }
 
@@ -2038,7 +2052,7 @@ async function suggestXI() {
     if (r.versionsSkipped) notes.push(`${r.versionsSkipped} extra version${r.versionsSkipped > 1 ? 's' : ''} of the same player stayed out, since a squad takes one of each.`);
     if (notes.length) toast(notes.join(' '), 'info');
   } catch (e) {
-    if (e.name !== 'AbortError') toast(e.message);
+    if (e.name !== 'AbortError') toast(e.message, 'error', requestLink(e));
   } finally {
     btn.disabled = false;
     btn.textContent = label;
@@ -2161,7 +2175,7 @@ async function deleteSquad() {
     $('#sqSaved').focus();
     toast(`Deleted “${name}”. The players stay on the pitch as a draft.`, 'info');
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error', requestLink(e));
   }
 }
 
@@ -2375,7 +2389,7 @@ async function boot() {
     await loadManagers();
     setupCustomForm();
   } catch (e) {
-    toast(e.message);
+    toast(e.message, 'error', requestLink(e));
   }
   if (!mgr(S.managerId) || mgr(S.managerId).missing) S.managerId = firstUsable()?.id || null;
   if (S.managerId && !S.tactics.some(t => t.key === S.tactic)) S.tactic = mgr(S.managerId).bestTactic;
@@ -2384,7 +2398,7 @@ async function boot() {
   if (S.v !== 'squad') showView(first);
   if (S.playerId) build({ newPlayer: true });
   else renderEmpty();
-  try { await loadSquadData(); } catch (e) { SQ.failed = true; toast(e.message); }
+  try { await loadSquadData(); } catch (e) { SQ.failed = true; toast(e.message, 'error', requestLink(e)); }
   if (S.v === 'squad') showView(SQ.draft ? 'squad' : first);
   else if (document.body.dataset.view === 'home') renderHomeSquad();
 }

@@ -1,15 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 // eFootball training-point builder. Data and rating logic from efhub.com (efootballhub.net).
-const fs = require('fs');
-const path = require('path');
+// Runs in Node (CLI + server) and in the browser (GitHub Pages build exposes it as globalThis.EFB).
+(function (root) {
+const isNode = typeof module === 'object' && !!module && !!module.exports && typeof require === 'function';
+const fs = isNode ? require('fs') : null;
+const path = isNode ? require('path') : null;
 
-const ROOT = __dirname;
-const CACHE = path.join(ROOT, 'cache');
-const PLAYER_CACHE = path.join(CACHE, 'players');
-const INDEX_FILE = path.join(CACHE, 'player-index.json');
-const BOOSTS_FILE = path.join(CACHE, 'boosts.json');
-const LASTFETCH_FILE = path.join(CACHE, '.lastfetch');
+const ROOT = isNode ? __dirname : '';
+const CACHE = isNode ? path.join(ROOT, 'cache') : '';
+const PLAYER_CACHE = isNode ? path.join(CACHE, 'players') : '';
+const INDEX_FILE = isNode ? path.join(CACHE, 'player-index.json') : '';
+const BOOSTS_FILE = isNode ? path.join(CACHE, 'boosts.json') : '';
+const LASTFETCH_FILE = isNode ? path.join(CACHE, '.lastfetch') : '';
 const BASE_URL = 'https://efhub.com';
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)';
 const CRAWL_DELAY_MS = 5000;
@@ -517,7 +520,7 @@ async function main() {
   node efhub_builder.js styles`);
 }
 
-if (require.main === module) {
+if (isNode && require.main === module) {
   // Corporate TLS proxies re-sign certificates with a CA that only lives in the OS store.
   const needsSystemCa = !process.execArgv.includes('--use-system-ca') && !process.env.EFHUB_CHILD
     && process.allowedNodeEnvironmentFlags.has('--use-system-ca');
@@ -528,10 +531,12 @@ if (require.main === module) {
   }
   main().catch(e => { console.error('error: ' + (e.cause?.code ? `${e.message} (${e.cause.code})` : e.message)); process.exit(1); });
 }
-module.exports = {
+const api = {
   ovr, ovrDec, applyProgression, computeMaxSliders, maxButtonSliders, playstyleSliders, parsePlayerHtml, buildCard, availablePoints,
   SLIDERS, MAX_SLIDER, levelCost, cumulativeCost, pointsUsed, zeroSliders, resolveBoosts, applyBoost, finalStats,
   loadBoosts, loadCard, loadIndex, politeFetch, cachedJson, grab, skillName, deaccent,
   STAT_LABEL, CARD_TYPES, ATTACK_STYLE_WEIGHTS, DEFENSE_STYLE_WEIGHTS, lookupStyle, POSITION_COLUMN, STAT_OFFSET, WEIGHTS,
   BASE_URL, CACHE, UA,
 };
+if (isNode) module.exports = api; else root.EFB = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);

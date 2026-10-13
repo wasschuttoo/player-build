@@ -1,7 +1,10 @@
 'use strict';
 // Manager-aware build optimizer. Pipeline (efhub order): sliders (cap 99) -> manager
 // tactic proficiency multiplier (cap 99) -> +1 per manager boost stat -> card boosts.
-const B = require('./efhub_builder.js');
+// Node: require()d by server.js. Browser: loads after efhub_builder.js and exposes globalThis.EFM.
+(function (root) {
+const isNode = typeof module === 'object' && !!module && !!module.exports && typeof require === 'function';
+const B = isNode ? require('./efhub_builder.js') : root.EFB;
 
 const MULT = [.65, .6675, .685, .7025, .72, .7375, .755, .7725, .79, .8075, .825, .8425, .86, .8775, .895, .9125, .93, .9475, .965, .9825, 1, 1, 1.01163, 1.01389, 1.015625, 1.01755, 1.01925, 1.02125, 1.02275, 1.0244, 1.026, 1.02725, 1.029, 1.03, 1.03196, 1.03275, 1.03375, 1.034091, 1.0355, 1.036, 1.0365, 1.036, 1.036, 1.036, 1.036, 1.036, 1.036, 1.036, 1.036, 1.036, 1.036];
 const mSkill = p => MULT[Math.min(p >= 50 ? p - 50 : 0, MULT.length - 1)];
@@ -256,4 +259,6 @@ function quickOvr(card, boosts, opts = {}) {
 
 const positionsOf = card => [card.position, ...(card.additionalPositions || []).map(p => p.position)].filter((p, i, a) => p && a.indexOf(p) === i);
 
-module.exports = { MULT, mSkill, mgrStat, ABILITY_MAP, TACTICS, TACTIC_WEIGHTS, normalizeManager, bestTactic, makeContext, finalStats, buildAll, quickOvr, positionsOf };
+const api = { MULT, mSkill, mgrStat, ABILITY_MAP, TACTICS, TACTIC_WEIGHTS, normalizeManager, bestTactic, makeContext, finalStats, buildAll, quickOvr, positionsOf };
+if (isNode) module.exports = api; else root.EFM = api;
+})(typeof globalThis !== 'undefined' ? globalThis : this);
