@@ -1,0 +1,13 @@
+services:
+  - type: web
+    name: build-album
+    runtime: node
+    plan: free
+    buildCommand: echo "no build step"
+    startCommand: node server.js
+    healthCheckPath: /
+    envVars:
+      - key: EFHUB_CHILD
+        value: "1"
+      - key: NODE_VERSION
+        value: "24"

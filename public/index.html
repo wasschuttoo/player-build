@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0B0E13">
+<meta name="color-scheme" content="dark">
+<title>Build Album · eFootball progression builds</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230B0E13'/%3E%3Crect x='4.5' y='4.5' width='23' height='23' rx='4' fill='none' stroke='%23FFC857'/%3E%3Ctext x='16' y='23' text-anchor='middle' font-family='Arial Narrow,Arial' font-weight='900' font-size='19' fill='%23FFC857'%3E7%3C/text%3E%3C/svg%3E">
+<link rel="preload" href="fonts/big-shoulders-latin.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="styles.css">
+</head>
+<!--
+THESIS: Every player card is a title on a streaming wall. Pick one and it opens wide, its three progression builds lined up like episodes. Refuses the category default: search bar, player card, manager dropdown, three build tables.
+OWN-WORLD: Card Wall. Near-black screen, full card art as posters, tall condensed caps, amber outline on whatever is chosen. No glass, glow or gradient text.
+STORY: Find a card, open it wide, pick the manager and Team Playstyle, slide the level, read three builds as rows of numbered slots, then compare stats.
+FIRST VIEWPORT: The card poster with the chosen build's slots, the level slider, then the build row.
+FORM: Card Wall (pop-culture-shelf-streaming-title-card-wall), dealt challenger in re-roll 1, seed key 6f9c13a6, mode operate, staging: none dealt / direct build.
+-->
+<body data-view="home">
+<a class="skip" href="#home">Skip to home</a>
+
+<header class="rail">
+  <h1 class="brand"><button class="brand-btn" id="brandHome" type="button" aria-label="Build Album home"><span class="brand-mark" aria-hidden="true">7</span><span class="brand-name">Build Album</span></button></h1>
+  <nav class="view-tabs" aria-label="Sections">
+    <button class="view-tab" id="viewHome" type="button" aria-pressed="true" data-v="home">
+      <svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 11l8-7 8 7"/><path d="M6 10v10h12V10"/></svg>
+      <span>Home</span>
+    </button>
+    <button class="view-tab" id="viewAlbum" type="button" aria-pressed="false" data-v="album">
+      <svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M8.5 15.5h7M8.5 18h4"/></svg>
+      <span>Player builds</span>
+    </button>
+    <button class="view-tab" id="viewSquad" type="button" aria-pressed="false" data-v="squad">
+      <svg class="tab-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M4 12h16"/><circle cx="12" cy="12" r="3"/></svg>
+      <span>Squad</span>
+    </button>
+  </nav>
+  <div class="rail-actions">
+    <button class="btn btn-print" id="findToggle" type="button" aria-expanded="false" aria-controls="finder">Find</button>
+    <button class="btn btn-print" id="openTeam" type="button">Managers <span class="count" id="teamCount"></span></button>
+  </div>
+</header>
+
+<section class="finder" id="finder" aria-label="Find a player">
+  <form id="findForm" role="search" autocomplete="off">
+    <label for="findInput" class="finder-label">Paste an efhub player link, or type a name</label>
+    <div class="finder-row">
+      <svg class="finder-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg>
+      <input id="findInput" class="field" type="search" enterkeyhint="search" spellcheck="false"
+        placeholder="efhub.com/players/88046… or Torres" aria-controls="results" aria-expanded="false">
+      <button class="btn btn-stick" type="submit" id="findBtn">Find</button>
+    </div>
+  </form>
+  <div id="results" class="results" hidden></div>
+</section>
+
+<main class="home" id="home" tabindex="-1" aria-labelledby="homeTitle" hidden>
+  <section class="home-lead" aria-labelledby="homeTitle">
+    <h2 class="home-title" id="homeTitle">What are we building?</h2>
+    <p class="home-sub" id="homeSub">Find a card, and we'll work out where every progression point should go for your manager.</p>
+    <form class="home-find" id="homeFind" role="search" autocomplete="off">
+      <label for="homeInput" class="home-find-label">Paste an efhub player link, or type a name</label>
+      <div class="finder-row">
+        <svg class="finder-ico" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="10.5" cy="10.5" r="6"/><path d="M15 15l5 5"/></svg>
+        <input id="homeInput" class="field" type="search" enterkeyhint="search" spellcheck="false"
+          placeholder="efhub.com/players/88046… or Torres" aria-controls="homeResults">
+        <button class="btn btn-stick" type="submit">Find</button>
+      </div>
+    </form>
+    <div id="homeResults" class="results home-results" aria-live="polite" hidden></div>
+  </section>
+
+  <section class="home-recent" aria-labelledby="homeRecentTitle">
+    <h2 class="home-h" id="homeRecentTitle">Recently built</h2>
+    <div id="homeRecent"></div>
+  </section>
+
+  <div class="home-side">
+    <section class="home-panel" aria-labelledby="homeSquadTitle">
+      <h2 class="home-h" id="homeSquadTitle">Your squad</h2>
+      <div id="homeSquad"></div>
+    </section>
+    <section class="home-panel" aria-labelledby="homeMgrTitle">
+      <h2 class="home-h" id="homeMgrTitle">Your managers</h2>
+      <div id="homeManagers"></div>
+    </section>
+  </div>
+</main>
+
+<main class="album" id="album" hidden>
+  <section class="hero" aria-label="Manager and player">
+    <div class="hero-card">
+      <div id="playerSlot" class="slot-player"></div>
+      <div id="twin" class="twin" aria-live="polite" hidden></div>
+    </div>
+    <div class="hero-ctl">
+      <div class="level-strip" id="levelStrip">
+        <div class="level-top">
+          <label class="level-label" for="level">Level <output id="levelOut" for="level">–</output><span class="level-cap" id="levelCap"></span></label>
+          <p class="level-pts" id="levelPts">No player yet</p>
+        </div>
+        <div class="level-row">
+          <button class="btn btn-round" type="button" id="levelDown" aria-label="Level down" disabled>−</button>
+          <input type="range" id="level" min="1" max="1" value="1" disabled>
+          <button class="btn btn-round" type="button" id="levelUp" aria-label="Level up" disabled>+</button>
+        </div>
+      </div>
+
+      <div id="pageBand" class="page-band" aria-hidden="true"></div>
+      <div id="mgrHead" class="mgr-head"></div>
+      <div id="playstyles" class="playstyles" role="radiogroup" aria-label="Team Playstyle"></div>
+      <div id="positions" class="positions" hidden></div>
+    </div>
+  </section>
+
+  <section class="shelf" id="builds" aria-labelledby="buildsTitle" tabindex="-1">
+    <header class="row-head">
+      <h2 id="buildsTitle">Progression builds</h2>
+      <p id="buildsSub" class="sub">Three ways to spend the same points.</p>
+    </header>
+    <ol id="buildList" class="builds"></ol>
+    <div id="diffStrip" class="diff"></div>
+
+    <section class="stats" aria-labelledby="statsTitle">
+      <header class="row-head">
+        <h2 id="statsTitle">Stats</h2>
+        <p class="sub">Tap a stat to make build 3 chase it.</p>
+      </header>
+      <div id="statsWrap" class="stats-wrap"></div>
+    </section>
+  </section>
+</main>
+
+<main id="squad" class="squad" tabindex="-1" aria-labelledby="squadTitle" hidden>
+  <section class="sq-side" aria-labelledby="squadTitle">
+    <header class="row-head sq-head">
+      <h2 id="squadTitle">Squad</h2>
+      <p class="sub" id="sqSub"></p>
+    </header>
+    <div id="sqMgrHead" class="mgr-head"></div>
+    <div id="sqStyles" class="playstyles sq-styles" role="radiogroup" aria-label="Team playstyle for this squad"></div>
+    <div class="sq-score">
+      <div id="sqSummary" class="sq-summary" aria-live="polite"></div>
+      <div class="sq-actions">
+        <button class="btn btn-stick" id="sqSuggest" type="button">Suggest best XI</button>
+        <button class="btn btn-print" id="sqClub" type="button">My club <span class="count" id="clubCount"></span></button>
+      </div>
+    </div>
+  </section>
+
+  <section class="sq-field" aria-label="Pitch and bench">
+    <div class="sq-bar">
+      <label class="form-row"><span>Formation</span><select class="field" id="sqFormation"></select></label>
+      <label class="form-row"><span>Saved squads</span><select class="field" id="sqSaved"></select></label>
+      <form class="sq-custom" id="sqCustomForm" novalidate hidden>
+        <label class="form-row" for="sqCustomInput"><span>Custom formation</span>
+          <input class="field" id="sqCustomInput" type="text" inputmode="numeric" autocomplete="off" spellcheck="false"
+            maxlength="13" placeholder="4-1-2-1-2" aria-describedby="sqCustomHelp sqCustomErr">
+        </label>
+        <button class="btn btn-stick" type="submit">Apply</button>
+        <button class="btn btn-print" type="button" id="sqCustomCancel">Cancel</button>
+        <p class="sq-custom-help" id="sqCustomHelp">Lines from defence to attack, adding up to 10. The keeper is added for you. Dashes optional.</p>
+        <p class="form-err" id="sqCustomErr" role="alert"></p>
+      </form>
+    </div>
+    <div id="pitch" class="pitch" role="group" aria-label="Starting eleven"></div>
+    <div class="bench-wrap">
+      <h3 class="bench-title" id="benchTitle">Bench <span class="count" id="benchCount"></span></h3>
+      <ul id="bench" class="bench" aria-labelledby="benchTitle"></ul>
+    </div>
+  </section>
+
+  <form id="sqSaveForm" class="sq-save" novalidate>
+    <label class="form-row"><span>Squad name</span><input class="field" id="sqName" maxlength="40" autocomplete="off" placeholder="e.g. Mourinho counter"></label>
+    <div class="sq-save-actions">
+      <button class="btn btn-stick" type="submit" id="sqSave">Save squad</button>
+      <button class="btn btn-print" type="button" id="sqNew">Start a new squad</button>
+      <button class="btn btn-danger" type="button" id="sqDelete" hidden>Delete squad</button>
+    </div>
+  </form>
+</main>
+
+<dialog id="team" class="sheet" aria-labelledby="teamTitle">
+  <div class="sheet-inner">
+    <header class="sheet-head">
+      <h2 id="teamTitle">Managers</h2>
+      <button class="btn btn-close" type="button" data-close aria-label="Close managers">×</button>
+    </header>
+    <div class="sheet-tabs" role="tablist" aria-label="Which managers">
+      <button role="tab" type="button" id="tabMine" aria-controls="mgrList" data-view="mine">My team <span class="count" id="tabMineCount"></span></button>
+      <button role="tab" type="button" id="tabAll" aria-controls="mgrList" data-view="all">All managers <span class="count" id="tabAllCount"></span></button>
+    </div>
+    <div class="sheet-tools" id="sheetTools"></div>
+    <p id="sheetMsg" class="sheet-msg" role="status" aria-live="polite"></p>
+    <ul id="mgrList" class="mgr-list" role="tabpanel" aria-labelledby="tabMine"></ul>
+  </div>
+</dialog>
+
+<dialog id="customDlg" class="sheet" aria-labelledby="customTitle">
+  <form id="customForm" class="sheet-inner" novalidate>
+    <header class="sheet-head">
+      <h2 id="customTitle">Custom manager</h2>
+      <button class="btn btn-close" type="button" data-close aria-label="Close custom manager">×</button>
+    </header>
+    <p class="sub">For a manager efhub doesn't list yet. Copy the Team Playstyle proficiencies from the game.</p>
+    <label class="form-row"><span>Name</span><input class="field" name="name" maxlength="40" required></label>
+    <fieldset class="form-grid" id="customSkills"><legend>Team Playstyle proficiency (40–99)</legend></fieldset>
+    <fieldset class="form-grid"><legend>Boosted skills (+1 each)</legend>
+      <label class="form-row"><span>Boost 1</span><select class="field" name="boost0"></select></label>
+      <label class="form-row"><span>Boost 2</span><select class="field" name="boost1"></select></label>
+    </fieldset>
+    <p id="customErr" class="form-err" role="alert"></p>
+    <div class="form-actions">
+      <button class="btn btn-print" type="button" data-close>Cancel</button>
+      <button class="btn btn-stick" type="submit">Save to my team</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="clubDlg" class="sheet" aria-labelledby="clubTitle">
+  <div class="sheet-inner">
+    <header class="sheet-head">
+      <h2 id="clubTitle">My club</h2>
+      <button class="btn btn-close" type="button" data-close aria-label="Close my club">×</button>
+    </header>
+    <div id="clubPicked" class="club-picked"></div>
+    <form id="clubForm" class="club-form" novalidate>
+      <label class="vh" for="clubInput">efhub link or player name</label>
+      <input class="field" id="clubInput" type="search" autocomplete="off" spellcheck="false" placeholder="efhub link or player name">
+      <button class="btn btn-stick" type="submit" id="clubAdd">Add</button>
+    </form>
+    <p id="clubMsg" class="sheet-msg" role="status" aria-live="polite"></p>
+    <ul id="clubResults" class="club-results" hidden></ul>
+    <ul id="clubList" class="mgr-list club-list"></ul>
+  </div>
+</dialog>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="app.js" defer></script>
+</body>
+</html>
