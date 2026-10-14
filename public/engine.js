@@ -1,25 +1,35 @@
 'use strict';
 // Build Album in-browser engine: the same /api/* maths as server.js, run on the page so the app can live on
 // GitHub Pages with no server. efhub's managers, boosts and player index allow cross-origin reads, so they're
-// fetched straight from efhub. Player pages don't, so cards come from data/cards/ in this repo; a GitHub Issue
-// ("Add player <id>") runs an Action that fetches the card and redeploys.
+// fetched straight from efhub. Player pages don't, so cards come from data/cards/ in this repo, which a 6-hourly
+// GitHub Action ("Prefetch cards") backfills with every efhub card, highest OVR first.
 (function () {
   const meta = document.querySelector('meta[name="ba-mode"]');
   if (meta && meta.content === 'server') return;
   const B = window.EFB, M = window.EFM;
   if (!B || !M) return;
 
-  const REPO = 'wasschuttoo/player-build';
   const STALE_MS = 7 * 24 * 3600 * 1000;
   const CLUB_MAX = 200;
   const BENCH_MAX = 12;
   const OFF_PENALTY = 8;
 
   class UserError extends Error { constructor(msg, status = 400) { super(msg); this.status = status; } }
-  const requestUrl = id => `https://github.com/${REPO}/issues/new?title=${encodeURIComponent(`Add player ${id}`)}&body=${encodeURIComponent(`https://efhub.com/players/${id}\n\nOpened from Build Album. A bot adds the card in about 1–2 minutes and closes this issue.`)}`;
-  const needsRequest = id => Object.assign(
-    new UserError("This card isn't in Build Album yet. Request it on GitHub — a bot adds it in about 1–2 minutes, then reload.", 404),
-    { needsRequest: true, id: String(id), requestUrl: requestUrl(id) });
+  const notInLibrary = id => Object.assign(
+    new UserError("This card's full stats are still loading — Build Album is adding every efhub card, popular types first. You can still add it to your club now.", 404),
+    { notInLibrary: true, id: String(id) });
+
+  // ---------------------------------------------------------------- timeouts (a stuck request must never hang the page)
+  const NET_MS = 15000, CACHE_MS = 3000;
+  const withTimeout = (p, ms) => Promise.race([p, new Promise((_, no) => setTimeout(() => no(new Error('timed out')), ms))]);
+  async function timedFetch(url, opts = {}) {
+    if (typeof AbortController !== 'function') return withTimeout(fetch(url, opts), NET_MS);
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort(), NET_MS);
+    try { return await fetch(url, { ...opts, signal: ctrl.signal }); } catch (e) {
+      throw ctrl.signal.aborted ? new Error('timed out') : e;
+    } finally { clearTimeout(t); }
+  }
 
   // ---------------------------------------------------------------- efhub JSON (CORS-enabled)
   const mem = new Map();
@@ -27,10 +37,10 @@
     const url = `${B.BASE_URL}${file}`;
     if (!refresh && mem.has(url)) return mem.get(url);
     let cache = null, stale = null;
-    try { cache = await caches.open('ba-efhub'); } catch {}
+    try { cache = await withTimeout(caches.open('ba-efhub'), CACHE_MS); } catch {}
     if (cache && !refresh) {
       try {
-        const hit = await cache.match(url);
+        const hit = await withTimeout(cache.match(url), CACHE_MS);
         if (hit) {
           const at = Number(hit.headers.get('x-ba-at')) || 0;
           const data = await hit.json();
@@ -40,9 +50,9 @@
       } catch {}
     }
     try {
-      const res = await fetch(url, { cache: refresh ? 'reload' : 'default' });
+      const res = await timedFetch(url, { cache: refresh ? 'reload' : 'default' });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const txt = await res.text();
+      const txt = await withTimeout(res.text(), NET_MS);
       const data = JSON.parse(txt);
       mem.set(url, data);
       if (cache) cache.put(url, new Response(txt, { headers: { 'Content-Type': 'application/json', 'x-ba-at': String(Date.now()) } })).catch(() => {});
@@ -50,7 +60,7 @@
     } catch (e) {
       if (stale) { mem.set(url, stale); return stale; }
       if (!refresh && cache) {
-        try { const hit = await cache.match(url); if (hit) { const d = await hit.json(); mem.set(url, d); return d; } } catch {}
+        try { const hit = await withTimeout(cache.match(url), CACHE_MS); if (hit) { const d = await hit.json(); mem.set(url, d); return d; } } catch {}
       }
       throw new UserError(`Could not reach efhub (${e.message}). Check your connection, then try again.`, 502);
     }
@@ -58,6 +68,21 @@
   const loadManagers = refresh => efhubJson('/data/managers.json', refresh);
   const loadIndex = () => efhubJson('/search/player-index.json');
   const loadBoosts = () => efhubJson('/data/boosts.json');
+  // Name and OVR from efhub's index for cards the library hasn't loaded yet ("waiting" players).
+  let indexById = null;
+  async function indexEntries() {
+    if (!indexById) indexById = loadIndex().then(list => new Map(list.map(e => [String(e.i), e]))).catch(() => { indexById = null; return new Map(); });
+    return indexById;
+  }
+  async function markWaiting(list) {
+    if (!list.some(p => p && p.missing)) return list;
+    const idx = await indexEntries();
+    for (const p of list) {
+      const e = p && p.missing && idx.get(String(p.id));
+      if (e) Object.assign(p, { waiting: true, name: e.e, ovr: e.o, baseOvr: e.o });
+    }
+    return list;
+  }
 
   // ---------------------------------------------------------------- card library (data/cards/ in the repo)
   const base = () => document.baseURI;
@@ -65,7 +90,7 @@
   let libIndex = null;
   async function loadLibIndex() {
     if (!libIndex) {
-      libIndex = fetch(new URL('data/cards/index.json', base()), { cache: 'no-cache' })
+      libIndex = timedFetch(new URL('data/cards/index.json', base()), { cache: 'no-cache' })
         .then(r => (r.ok ? r.json() : []))
         .then(list => new Map((Array.isArray(list) ? list : []).map(e => [String(e.id), e])))
         .catch(() => { libIndex = null; return new Map(); });
@@ -75,12 +100,12 @@
   async function libCard(id, refresh) {
     if (!refresh && libCards.has(id)) return libCards.get(id);
     let res;
-    try { res = await fetch(new URL(`data/cards/${id}.json`, base()), { cache: refresh ? 'reload' : 'no-cache' }); } catch {
+    try { res = await timedFetch(new URL(`data/cards/${id}.json`, base()), { cache: refresh ? 'reload' : 'no-cache' }); } catch {
       throw new UserError("Couldn't reach Build Album's card library. Check your connection, then try again.", 503);
     }
     if (!res.ok) return null;
     try {
-      const c = await res.json();
+      const c = await withTimeout(res.json(), NET_MS);
       if (!c || !c.baseStats || B.POSITION_COLUMN[c.position] === undefined) return null;
       c.id = String(id);
       libCards.set(id, c);
@@ -108,7 +133,7 @@
     if (refresh) ovrMemo.clear();
     else if (sentInline(ctx, id)) return cachedCard(ctx, id);
     const c = await libCard(String(id), !!refresh);
-    if (!c) throw needsRequest(id);
+    if (!c) throw notInLibrary(id);
     return c;
   }
 
@@ -142,6 +167,99 @@
     return map;
   }
   const personOf = c => B.deaccent(c.name || '').trim();
+  const baseOvrOf = c => c.overallRating || B.ovr(c.baseStats, c.position, c.height, c.weakFootAccuracy);
+
+  // ---------------------------------------------------------------- playstyle ↔ role compatibility
+  // 3 = the role the style was made for, 2 = a good fit, 1 = workable. Anything unlisted is out of role.
+  const normStyle = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+  const ROLE_GROUP = { GK: 'GK', CB: 'CB', LB: 'FB', RB: 'FB', DMF: 'DM', CMF: 'CM', AMF: 'AM', LMF: 'WM', RMF: 'WM', LWF: 'W', RWF: 'W', SS: 'SS', CF: 'CF' };
+  const ATT_FIT = {
+    GK: { offensivegoalkeeper: 3, defensivegoalkeeper: 3 },
+    CB: { buildup: 3, destroyer: 3, extrafrontman: 2, anchorman: 1 },
+    FB: { offensivewingback: 3, defensivefullback: 3, fullbackfinisher: 3, crossspecialist: 1 },
+    DM: { anchorman: 3, destroyer: 3, orchestrator: 3, boxtobox: 2, buildup: 2, holeplayer: 1 },
+    CM: { boxtobox: 3, orchestrator: 3, holeplayer: 3, creativeplaymaker: 2, destroyer: 2, anchorman: 1, classicno10: 1 },
+    AM: { creativeplaymaker: 3, holeplayer: 3, classicno10: 3, deeplyingforward: 2, boxtobox: 1, orchestrator: 1, prolificwinger: 1 },
+    WM: { creativeplaymaker: 3, crossspecialist: 3, roamingflank: 2, prolificwinger: 2, boxtobox: 2, offensivewingback: 1 },
+    W: { prolificwinger: 3, roamingflank: 3, creativeplaymaker: 2, crossspecialist: 2, goalpoacher: 1 },
+    SS: { deeplyingforward: 3, holeplayer: 3, classicno10: 3, goalpoacher: 2, creativeplaymaker: 2, dummyrunner: 2, foxinthebox: 1 },
+    CF: { goalpoacher: 3, foxinthebox: 3, targetman: 3, deeplyingforward: 2, dummyrunner: 2, classicno10: 1, holeplayer: 1 },
+  };
+  const DEF_FIT = {
+    GK: { buildupgk: 3, highlinegk: 3, sweepergk: 3, offensivegoalkeeper: 3, defensivegoalkeeper: 3 },
+    CB: { deepdefender: 3, coveringrole: 3, highlinemaster: 3, toughmarker: 3, allactiondefender: 2, passdisruptor: 1 },
+    FB: { highlinemaster: 3, pressback: 3, coveringrole: 2, toughmarker: 2, allactiondefender: 2, deepdefender: 2 },
+    DM: { passdisruptor: 3, coveringrole: 3, allactiondefender: 3, toughmarker: 2, deepdefender: 2, pressback: 2 },
+    CM: { passdisruptor: 3, allactiondefender: 3, pressback: 3, coveringrole: 2, toughmarker: 1 },
+    AM: { pressback: 3, frontlinepressure: 3, passdisruptor: 2, attackoutlet: 1 },
+    WM: { pressback: 3, frontlinepressure: 2, allactiondefender: 2, attackoutlet: 2, passdisruptor: 1 },
+    W: { attackoutlet: 3, frontlinepressure: 3, pressback: 2, frontlinepoacher: 2 },
+    SS: { frontlinepressure: 3, attackoutlet: 3, frontlinepoacher: 3, pressback: 2 },
+    CF: { frontlinepoacher: 3, frontlinepressure: 3, attackoutlet: 3 },
+  };
+  const TACTIC_TILT = {
+    QuickCounter: ['goalpoacher', 'prolificwinger', 'destroyer', 'boxtobox', 'dummyrunner'],
+    PossessionGame: ['orchestrator', 'holeplayer', 'buildup', 'creativeplaymaker', 'classicno10'],
+    LongBallCounter: ['targetman', 'goalpoacher', 'anchorman', 'destroyer'],
+    OutWide: ['crossspecialist', 'roamingflank', 'offensivewingback', 'targetman', 'prolificwinger'],
+    LongBall: ['targetman', 'foxinthebox', 'buildup', 'crossspecialist'],
+    OverLoad: ['holeplayer', 'creativeplaymaker', 'boxtobox', 'roamingflank', 'extrafrontman'],
+  };
+  const tacticLabel = key => (M.TACTICS.find(t => t.key === key) || {}).label || key;
+  const COMPAT_WORD = { ideal: 'is made for', good: 'suits', ok: 'can cover', poor: "isn't built for" };
+
+  function compatOf(card, pos, tactic, phase) {
+    const group = ROLE_GROUP[pos] || 'CM';
+    const att = card.playingStyle, def = card.playingStyleDefensive;
+    const a = att ? ATT_FIT[group][normStyle(att)] || 0 : null;
+    const d = def ? DEF_FIT[group][normStyle(def)] || 0 : null;
+    const tilt = phase !== 'def' && att && (TACTIC_TILT[tactic] || []).includes(normStyle(att));
+    let score, style;
+    if (phase === 'def') {
+      if (d !== null) { score = d + (a || 0) * 0.25; style = def; } else if (a !== null) { score = a * 0.8; style = att; } else score = null;
+    } else if (a !== null) {
+      score = a + (tilt ? 0.5 : 0) + (d ? d * 0.15 : 0); style = att;
+    } else score = null;
+    if (score === null) return { score: null, label: 'unknown', bonus: 0, style: null, why: 'No playing style on this card.' };
+    const label = score >= 3 ? 'ideal' : score >= 2 ? 'good' : score >= 1 ? 'ok' : 'poor';
+    let why = `${style} ${COMPAT_WORD[label]} ${pos}${phase === 'def' ? ' when defending' : ''}.`;
+    if (tilt) why += ` Thrives in ${tacticLabel(tactic)}.`;
+    const bonus = Math.max(-1, Math.min(2, score * 0.8 - 1));
+    return { score: Math.round(score * 10) / 10, label, bonus: Math.round(bonus * 100) / 100, style, why };
+  }
+
+  // Team-level read on the XI: does it have a creator, a finisher, a shield — and which pairings click?
+  function squadNotes(slots) {
+    const xi = slots.filter(s => s && !s.missing);
+    if (xi.length < 6) return [];
+    const notes = [];
+    const at = groups => xi.filter(s => groups.includes(ROLE_GROUP[s.pos]));
+    const styled = (list, styles) => list.filter(s => styles.includes(normStyle(s.playingStyle)));
+    const short = s => String(s.name || '').split(' ').pop();
+    const front = at(['CF', 'SS', 'W', 'AM']), mid = at(['DM', 'CM', 'AM', 'WM']), back = at(['CB', 'FB']);
+    const creators = styled([...mid, ...front], ['creativeplaymaker', 'orchestrator', 'classicno10', 'holeplayer']);
+    const finishers = styled(front, ['goalpoacher', 'foxinthebox', 'targetman', 'prolificwinger', 'deeplyingforward', 'dummyrunner']);
+    const shields = [...styled(mid, ['anchorman', 'destroyer']), ...mid.filter(s => ['passdisruptor', 'coveringrole'].includes(normStyle(s.playingStyleDefensive)))];
+    const targetMen = styled(front, ['targetman']);
+    const poachers = styled(front, ['goalpoacher', 'foxinthebox']);
+    const engines = styled(mid, ['boxtobox']), anchors = styled(mid, ['anchorman', 'orchestrator', 'destroyer']);
+    if (targetMen.length && poachers.length) notes.push({ tone: 'good', text: `${short(targetMen[0])} holds it up for ${short(poachers[0])} — a classic strike partnership.` });
+    if (engines.length && anchors.length) notes.push({ tone: 'good', text: `${short(anchors[0])} sits, ${short(engines[0])} runs — a balanced midfield.` });
+    if (!creators.length) notes.push({ tone: 'warn', text: 'Nobody to unlock a defence. An Orchestrator, Creative Playmaker or Classic No. 10 adds the final pass.' });
+    if (!finishers.length && front.length) notes.push({ tone: 'warn', text: 'No natural finisher up front. A Goal Poacher or Fox In The Box converts more chances.' });
+    if (!shields.length && mid.length >= 2) notes.push({ tone: 'warn', text: 'No midfield shield. An Anchor Man or Destroyer protects the back line.' });
+    if (styled(back, ['offensivewingback', 'fullbackfinisher', 'extrafrontman']).length >= 3) notes.push({ tone: 'warn', text: 'Three or more defenders bomb forward, leaving space behind on the counter.' });
+    if (targetMen.length >= 2) notes.push({ tone: 'warn', text: 'Two Target Men want the same aerial ball.' });
+    if (styled(mid, ['orchestrator']).length >= 2) notes.push({ tone: 'warn', text: 'Two Orchestrators crowd the same space.' });
+    const poor = xi.filter(s => s.compat && s.compat.label === 'poor');
+    if (poor.length) notes.push({ tone: 'warn', text: `Out of role: ${poor.slice(0, 3).map(s => `${short(s)} (${s.playingStyle}) at ${s.pos}`).join(', ')}${poor.length > 3 ? '…' : ''}.` });
+    return notes.slice(0, 5);
+  }
+  function chemistryOf(slots) {
+    const known = slots.filter(s => s && !s.missing && s.compat && s.compat.score !== null);
+    if (!known.length) return null;
+    return Math.round(known.reduce((a, s) => a + Math.min(3, Math.max(0, s.compat.score)) / 3, 0) / known.length * 100);
+  }
 
   function fitOf(card, pos) {
     if (card.position === pos) return 'main';
@@ -157,7 +275,8 @@
       id: String(c.id || id), name: c.name, team: c.team, position: c.position,
       positions: [{ pos: c.position, fit: 'main' }, ...(c.additionalPositions || []).map(p => ({ pos: p.position, fit: p.familiarity >= 2 ? 'strong' : 'learned' }))],
       type: B.CARD_TYPES[c.playerType] || '', levelCap: c.levelCap, playingStyle: c.playingStyle,
-      baseOvr: c.overallRating || B.ovr(c.baseStats, c.position, c.height, c.weakFootAccuracy), person: personOf(c), added,
+      playingStyleDefensive: c.playingStyleDefensive || null,
+      baseOvr: baseOvrOf(c), person: personOf(c), added,
     };
   }
   // Pull library cards a request needs up front so the maths below can stay synchronous (misses stay missing).
@@ -215,6 +334,35 @@
   }
   const formationOf = key => FORMATIONS.find(f => f.key === key) || customFormation(key) || FORMATIONS[0];
 
+  // Current meta shapes per team playstyle, each with the shape it drops into when defending (fluid formation).
+  const META = {
+    QuickCounter: [
+      { att: '4-2-1-3', def: '4-4-2', why: 'Two DMFs screen, three forwards break the instant the ball turns over.' },
+      { att: '4-3-3', def: '4-5-1', why: 'Wingers stay high for the counter while three CMFs press the middle.' },
+    ],
+    PossessionGame: [
+      { att: '4-3-3', def: '4-1-4-1', why: 'Triangles everywhere — an anchor, two 8s and wide forwards to stretch the box.' },
+      { att: '4-2-3-1', def: '4-4-2', why: 'Double pivot keeps the ball safe; the AMF threads it to a lone striker.' },
+      { att: '3-2-4-1', def: '5-2-1-2', why: 'Five across the attacking line overloads the half-spaces.' },
+    ],
+    LongBallCounter: [
+      { att: '4-4-2', def: '4-4-2', why: 'Two compact banks of four, then a quick ball to the strike pair.' },
+      { att: '5-2-1-2', def: '5-3-2', why: 'Five at the back absorbs pressure; a target man and runner go long.' },
+    ],
+    OutWide: [
+      { att: '4-1-4-1', def: '4-5-1', why: 'Wide midfielders hug the line and cross early for a target striker.' },
+      { att: '4-2-3-1', def: '4-4-2', why: 'Overlapping full-backs plus wide MFs double up on each flank.' },
+    ],
+    LongBall: [
+      { att: '4-4-2', def: '4-4-2', why: 'A big target man wins the first ball, his partner feeds on the knockdown.' },
+      { att: '4-3-1-2', def: '4-4-2', why: 'Diamond midfield wins second balls behind two forwards.' },
+    ],
+    OverLoad: [
+      { att: '3-2-4-1', def: '5-2-1-2', why: 'Crowd one side with four attackers, then switch to the free flank.' },
+      { att: '4-2-1-3', def: '4-2-3-1', why: 'Front four rotate freely around the AMF to overload a zone.' },
+    ],
+  };
+
   const ovrMemo = new Map();
   function slotOvr(ctx, card, boosts, pos, manager, tactic) {
     const memo = inlineCards.has(card) ? ctx.memo : ovrMemo;
@@ -228,12 +376,13 @@
     return v;
   }
 
-  function slotScore(ctx, card, boosts, pos, manager, tactic) {
+  // OVR still leads, but a playing style that suits the slot is worth up to ~2 OVR (and a clash costs 1).
+  function slotScore(ctx, card, boosts, pos, manager, tactic, phase = 'att') {
     const fit = fitOf(card, pos);
     if ((pos === 'GK') !== M.positionsOf(card).includes('GK') && fit === 'off') return null;
     const r = slotOvr(ctx, card, boosts, pos, manager, tactic);
     const bonus = { main: 0.6, strong: 0.4, learned: 0, off: -OFF_PENALTY }[fit];
-    return r.ovrDec + bonus;
+    return r.ovrDec + bonus + compatOf(card, pos, tactic, phase).bonus;
   }
 
   function hungarian(cost) {
@@ -264,7 +413,60 @@
   }
 
   function playerOut(card, extra) {
-    return { id: String(card.id), name: card.name, team: card.team, type: B.CARD_TYPES[card.playerType] || '', playingStyle: card.playingStyle, position: card.position, person: personOf(card), ...extra };
+    return {
+      id: String(card.id), name: card.name, team: card.team, type: B.CARD_TYPES[card.playerType] || '',
+      playingStyle: card.playingStyle, playingStyleDefensive: card.playingStyleDefensive || null,
+      skills: (card.skills || []).map(B.skillName), comSkills: (card.comSkills || []).map(B.skillName),
+      position: card.position, person: personOf(card), ...extra,
+    };
+  }
+
+  // The playstyle-weighted build for this exact slot (position + playing style + team tactic).
+  const buildMemo = new Map();
+  function roleBuild(ctx, card, boosts, pos, manager, tactic) {
+    const memo = inlineCards.has(card) ? ctx.memo : buildMemo;
+    const key = `b|${card.id}|${pos}|${tactic || ''}|${manager ? JSON.stringify(M.normalizeManager(manager)) : '-'}`;
+    if (memo.has(key)) return memo.get(key);
+    let v = null;
+    try {
+      const b = M.buildAll(card, boosts, { pos, manager, tactic }).builds[1];
+      v = { title: b.title, ovr: b.ovr, pointsUsed: b.pointsUsed, sliders: b.sliders.filter(s => s.value > 0).map(s => ({ key: s.key, label: s.label, value: s.value })) };
+    } catch { v = null; }
+    if (memo.size > 5000) memo.clear();
+    memo.set(key, v);
+    return v;
+  }
+
+  // Re-seat the same XI into the defensive shape: each player takes the def slot that suits them best.
+  function defensiveShape(ctx, boosts, xiCards, defForm, manager, tactic, manual) {
+    const S = defForm.slots.length;
+    let assign;
+    const manualIds = Array.isArray(manual) ? manual.slice(0, S).map(x => (x ? String(x) : null)) : null;
+    const xiIds = xiCards.map(c => String(c.id));
+    if (manualIds && manualIds.filter(Boolean).length && manualIds.every(id => !id || xiIds.includes(id))) {
+      assign = xiCards.map(c => manualIds.indexOf(String(c.id)));
+      const free = defForm.slots.map((_, i) => i).filter(i => !assign.includes(i));
+      assign = assign.map(c => (c >= 0 ? c : free.shift() ?? -1));
+    } else {
+      const n = Math.max(xiCards.length, S);
+      const cost = Array.from({ length: n }, (_, r) => Array.from({ length: n }, (_, c) => {
+        if (r >= xiCards.length || c >= S) return 0;
+        const sc = slotScore(ctx, xiCards[r], boosts, defForm.slots[c].pos, manager, tactic, 'def');
+        return sc === null ? 1e6 : -sc;
+      }));
+      assign = hungarian(cost).slice(0, xiCards.length);
+    }
+    const slots = new Array(S).fill(null);
+    xiCards.forEach((card, r) => {
+      const c = assign[r];
+      if (c < 0 || c >= S) return;
+      const pos = defForm.slots[c].pos;
+      const o = slotOvr(ctx, card, boosts, pos, manager, tactic);
+      slots[c] = playerOut(card, { pos, ovr: o.ovr, cardOvr: o.cardOvr, fit: fitOf(card, pos), compat: compatOf(card, pos, tactic, 'def') });
+    });
+    const filled = slots.filter(Boolean);
+    const avg = filled.length ? Math.round(filled.reduce((a, s) => a + slotOvr(ctx, cachedCard(ctx, s.id), boosts, s.pos, manager, tactic).ovrDec, 0) / filled.length * 10) / 10 : null;
+    return { formation: defForm.key, slots, avg, chemistry: chemistryOf(slots), ids: slots.map(s => (s ? s.id : null)) };
   }
 
   async function evaluateSquad(ctx, body, manager) {
@@ -279,13 +481,13 @@
       const pos = form.slots[i].pos;
       if (!card) return { id: String(id), missing: true, pos };
       const r = rate(card, pos, tactic);
-      return playerOut(card, { pos, ovr: r.ovr, cardOvr: r.cardOvr, fit: fitOf(card, pos), levelCap: card.levelCap });
+      return playerOut(card, { pos, ovr: r.ovr, cardOvr: r.cardOvr, fit: fitOf(card, pos), levelCap: card.levelCap, compat: compatOf(card, pos, tactic, 'att'), build: roleBuild(ctx, card, boosts, pos, manager, tactic) });
     });
     const bench = (body.bench || []).slice(0, BENCH_MAX).map(id => {
       const card = cachedCard(ctx, id);
       if (!card) return { id: String(id), missing: true };
       const r = rate(card, card.position, tactic);
-      return playerOut(card, { pos: card.position, ovr: r.ovr, cardOvr: r.cardOvr, fit: 'main' });
+      return playerOut(card, { pos: card.position, ovr: r.ovr, cardOvr: r.cardOvr, fit: 'main', compat: compatOf(card, card.position, tactic, 'att') });
     });
     const filled = slots.filter(s => s && !s.missing);
     const avgFor = t => {
@@ -294,12 +496,21 @@
       return Math.round((sum / filled.length) * 10) / 10;
     };
     const mgr = manager ? M.normalizeManager(manager) : null;
-    return {
+    const out = {
       formation: form.key, tactic, slots, bench, filled: filled.length,
       avg: avgFor(tactic),
+      chemistry: chemistryOf(slots),
+      notes: squadNotes(slots),
       byTactic: M.TACTICS.map(t => ({ key: t.key, avg: avgFor(t.key), proficiency: mgr ? mgr.skills[t.key] : null })),
       manager: mgr && { id: String(mgr.id ?? ''), name: mgr.name, proficiency: mgr.skills[tactic], multiplier: M.mSkill(mgr.skills[tactic]) },
     };
+    if (body.fluid && body.defFormation) {
+      const defForm = formationOf(body.defFormation);
+      const xiCards = filled.map(s => cachedCard(ctx, s.id)).filter(Boolean);
+      out.fluid = true;
+      out.def = defensiveShape(ctx, boosts, xiCards, defForm, manager, tactic, body.defSlots);
+    }
+    return out;
   }
 
   async function suggestSquad(ctx, body, manager) {
@@ -336,7 +547,7 @@
     }).sort((a, b) => b.ovr - a.ovr);
     const benchGk = rest.find(x => x.card.position === 'GK');
     const benchPick = [...(benchGk ? [benchGk] : []), ...rest.filter(x => x !== benchGk)].slice(0, BENCH_MAX);
-    const out = await evaluateSquad(ctx, { ...body, formation: form.key, tactic, slots, bench: benchPick.map(x => String(x.card.id)) }, manager);
+    const out = await evaluateSquad(ctx, { ...body, formation: form.key, tactic, slots, bench: benchPick.map(x => String(x.card.id)), defSlots: null }, manager);
     const empty = form.slots.map((s, i) => (slots[i] ? null : s.pos)).filter(Boolean);
     out.ids = { slots, bench: benchPick.map(x => String(x.card.id)) };
     out.empty = empty;
@@ -402,7 +613,13 @@
     async 'POST /api/card-summary'(ctx, q, body) {
       const id = findPlayerId(body.id);
       if (!id) throw new UserError('Paste an efhub player link (efhub.com/players/…) or search by name.');
-      const card = await getCard(ctx, id, false);
+      let card;
+      try { card = await getCard(ctx, id, false); } catch (e) {
+        if (!e.notInLibrary) throw e;
+        const entry = (await indexEntries()).get(id);
+        if (!entry) throw e;
+        return { id, missing: true, waiting: true, name: entry.e, ovr: entry.o, baseOvr: entry.o };
+      }
       return { ...clubSummary(ctx, id), name: card.name, card };
     },
 
@@ -411,14 +628,16 @@
       await ensureCards(ctx, ids);
       const cards = {};
       for (const id of ids) { if (!sentInline(ctx, id)) { const c = libCards.get(id); if (c) cards[id] = c; } }
-      return { players: ids.map(id => clubSummary(ctx, id)), cards };
+      return { players: await markWaiting(ids.map(id => clubSummary(ctx, id))), cards };
     },
 
     async 'GET /api/legacy-import'() { return {}; },
 
     async 'POST /api/squad/evaluate'(ctx, q, body) {
       await ensureCards(ctx, [...cleanIds(body.slots, 11), ...cleanIds(body.bench, BENCH_MAX)]);
-      return evaluateSquad(ctx, body, await resolveManager(body));
+      const out = await evaluateSquad(ctx, body, await resolveManager(body));
+      await markWaiting([...out.slots, ...out.bench]);
+      return out;
     },
 
     async 'POST /api/squad/suggest'(ctx, q, body) {
@@ -439,8 +658,32 @@
       return ids.map(id => cachedCard(ctx, id)).filter(Boolean).map(card => {
         const fit = fitOf(card, pos);
         const r = slotOvr(ctx, card, boosts, pos, manager, tactic);
-        return playerOut(card, { pos, ovr: r.ovr, cardOvr: r.cardOvr, fit, levelCap: card.levelCap });
-      }).sort((a, b) => (a.fit === 'off') - (b.fit === 'off') || b.ovr - a.ovr);
+        return playerOut(card, { pos, ovr: r.ovr, cardOvr: r.cardOvr, fit, levelCap: card.levelCap, compat: compatOf(card, pos, tactic, 'att') });
+      }).sort((a, b) => (a.fit === 'off') - (b.fit === 'off') || (b.ovr + b.compat.bonus) - (a.ovr + a.compat.bonus));
+    },
+
+    // Meta shapes for the manager's best tactics, ranked on the user's own club when there is one.
+    async 'POST /api/squad/meta'(ctx, q, body) {
+      const manager = await resolveManager(body);
+      const mgr = manager ? M.normalizeManager(manager) : null;
+      const tactics = M.TACTICS.map(t => ({ key: t.key, prof: mgr ? mgr.skills[t.key] : null }))
+        .sort((a, b) => (b.prof ?? 0) - (a.prof ?? 0)).slice(0, mgr ? 3 : M.TACTICS.length);
+      const ids = cleanIds(body.club, CLUB_MAX).filter(Boolean);
+      if (ids.length >= 11) await ensureCards(ctx, ids);
+      const rankable = ids.filter(id => cachedCard(ctx, id)).length >= 11;
+      const picks = [];
+      for (const t of tactics) {
+        for (const m of META[t.key] || []) {
+          const item = { formation: m.att, defFormation: m.def, tactic: t.key, tacticLabel: tacticLabel(t.key), proficiency: t.prof, reason: m.why, avg: null, chemistry: null };
+          if (rankable) {
+            const s = await suggestSquad(ctx, { club: ids, formation: m.att, tactic: t.key }, manager);
+            Object.assign(item, { avg: s.avg, chemistry: s.chemistry });
+          }
+          picks.push(item);
+        }
+      }
+      const score = p => (p.proficiency ?? 0) * 0.15 + (p.avg ?? 0) + (p.chemistry ?? 0) * 0.03;
+      return { ranked: rankable, picks: picks.sort((a, b) => score(b) - score(a)).slice(0, 6) };
     },
   };
 
@@ -459,5 +702,5 @@
     }
   }
 
-  window.BA_ENGINE = { handle, requestUrl };
+  window.BA_ENGINE = { handle };
 })();

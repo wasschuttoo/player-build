@@ -5,26 +5,44 @@
 //   node scripts/fetch-card.js --import <dir of cached card JSON>
 const fs = require('fs');
 const path = require('path');
-const { parsePlayerHtml, CARD_TYPES, BASE_URL, UA } = require('../efhub_builder.js');
+const { parsePlayerHtml, CARD_TYPES, POSITION_COLUMN, BASE_URL, UA } = require('../efhub_builder.js');
 
 const OUT = path.join(__dirname, '..', 'public', 'data', 'cards');
 const INDEX = path.join(OUT, 'index.json');
 
 const readIndex = () => { try { return JSON.parse(fs.readFileSync(INDEX, 'utf8')); } catch { return []; } };
 
+// Errors that retrying won't fix (the card itself is unusable).
+const unusable = msg => Object.assign(new Error(msg), { permanent: true });
+
+// id -> array position, so upserts stay fast with tens of thousands of cards.
+const positions = new WeakMap();
+function slotOf(index, id) {
+  let map = positions.get(index);
+  if (!map || map.size !== index.length) {
+    map = new Map(index.map((e, i) => [String(e.id), i]));
+    positions.set(index, map);
+  }
+  return map;
+}
+
 function save(card, index) {
-  if (!card?.baseStats || !card.id) throw new Error('Card has no stats');
+  if (!card?.baseStats || !card.id) throw unusable('Card has no stats');
+  if (POSITION_COLUMN[card.position] === undefined) throw unusable(`Card has unknown position "${card.position}"`);
   fs.writeFileSync(path.join(OUT, `${card.id}.json`), JSON.stringify(card));
   const entry = { id: card.id, name: card.name, team: card.team, position: card.position, type: CARD_TYPES[card.playerType] || String(card.playerType ?? '') };
-  const i = index.findIndex(e => e.id === card.id);
-  if (i >= 0) index[i] = entry; else index.push(entry);
+  const map = slotOf(index, card.id);
+  const i = map.get(String(card.id));
+  if (i !== undefined) index[i] = entry;
+  else { map.set(String(card.id), index.length); index.push(entry); }
   return entry;
 }
 
 async function fetchCard(id) {
   const res = await fetch(`${BASE_URL}/players/${id}`, { headers: { 'User-Agent': UA, Accept: 'text/html' } });
-  if (!res.ok) throw new Error(`efhub returned HTTP ${res.status} for player ${id}`);
-  const card = parsePlayerHtml(await res.text());
+  if (!res.ok) throw Object.assign(new Error(`efhub returned HTTP ${res.status} for player ${id}`), { status: res.status, permanent: res.status === 404 || res.status === 410 });
+  let card;
+  try { card = parsePlayerHtml(await res.text()); } catch (e) { throw unusable(`Could not read player ${id}: ${e.message}`); }
   if (!card.id) card.id = id;
   return card;
 }
@@ -48,9 +66,17 @@ async function main(args) {
       added.push(save(await fetchCard(id), index));
     }
   }
-  index.sort((a, b) => String(a.name).localeCompare(String(b.name)));
-  fs.writeFileSync(INDEX, JSON.stringify(index, null, 1));
+  writeIndex(index);
   for (const e of added) console.log(`${e.id}\t${e.name} (${e.type}, ${e.position})`);
 }
 
-main(process.argv.slice(2)).catch(e => { console.error(`error: ${e.message}`); process.exit(1); });
+// One entry per line: compact for tens of thousands of cards, still readable in diffs.
+function writeIndex(index) {
+  index.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  positions.delete(index);
+  fs.writeFileSync(INDEX, `[\n${index.map(e => JSON.stringify(e)).join(',\n')}\n]\n`);
+}
+
+module.exports = { save, fetchCard, readIndex, writeIndex, OUT, INDEX };
+
+if (require.main === module) main(process.argv.slice(2)).catch(e => { console.error(`error: ${e.message}`); process.exit(1); });

@@ -141,6 +141,11 @@ FORM: Card Wall (pop-culture-shelf-streaming-title-card-wall), dealt challenger 
     </header>
     <div id="sqMgrHead" class="mgr-head"></div>
     <div id="sqStyles" class="playstyles sq-styles" role="radiogroup" aria-label="Team playstyle for this squad"></div>
+    <section class="sq-metas" aria-labelledby="sqMetaTitle">
+      <h3 class="sq-metas-title" id="sqMetaTitle">Meta shapes</h3>
+      <p class="sq-metas-sub" id="sqMetaSub"></p>
+      <ul id="sqMetaList" class="meta-list"></ul>
+    </section>
     <div class="sq-score">
       <div id="sqSummary" class="sq-summary" aria-live="polite"></div>
       <div class="sq-actions">
@@ -153,6 +158,12 @@ FORM: Card Wall (pop-culture-shelf-streaming-title-card-wall), dealt challenger 
   <section class="sq-field" aria-label="Pitch and bench">
     <div class="sq-bar">
       <label class="form-row"><span>Formation</span><select class="field" id="sqFormation"></select></label>
+      <label class="switch" for="sqFluid">
+        <input type="checkbox" id="sqFluid" role="switch">
+        <span class="switch-track" aria-hidden="true"></span>
+        <span class="switch-text">Fluid formation</span>
+      </label>
+      <label class="form-row" id="sqDefFormationRow" hidden><span>Defending in</span><select class="field" id="sqDefFormation"></select></label>
       <label class="form-row"><span>Saved squads</span><select class="field" id="sqSaved"></select></label>
       <form class="sq-custom" id="sqCustomForm" novalidate hidden>
         <label class="form-row" for="sqCustomInput"><span>Custom formation</span>
@@ -164,6 +175,10 @@ FORM: Card Wall (pop-culture-shelf-streaming-title-card-wall), dealt challenger 
         <p class="sq-custom-help" id="sqCustomHelp">Lines from defence to attack, adding up to 10. The keeper is added for you. Dashes optional.</p>
         <p class="form-err" id="sqCustomErr" role="alert"></p>
       </form>
+    </div>
+    <div class="sq-phase" id="sqPhase" role="tablist" aria-label="Which shape to show" hidden>
+      <button type="button" role="tab" id="sqPhaseAtt" data-phase="att" aria-controls="pitch" aria-selected="true">Attacking</button>
+      <button type="button" role="tab" id="sqPhaseDef" data-phase="def" aria-controls="pitch" aria-selected="false" tabindex="-1">Defending</button>
     </div>
     <div id="pitch" class="pitch" role="group" aria-label="Starting eleven"></div>
     <div class="bench-wrap">

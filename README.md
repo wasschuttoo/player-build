@@ -22,9 +22,17 @@ https://wasschuttoo.github.io/player-build/
 
 The live site is fully static. All build maths runs in your browser, and managers, boosts and the player search index are read straight from efhub.
 
-Player cards come from the library in `public/data/cards/`. efhub doesn't allow browsers to read player pages directly, so new cards are added through GitHub:
+Player cards come from the library in `public/data/cards/`. efhub doesn't allow browsers to read player pages directly, so GitHub Actions copies every card into the repo:
 
-1. Paste an efhub link for a card that isn't in the library. The app offers a **Request this card** link.
+- The **Prefetch cards** workflow (`.github/workflows/prefetch-cards.yml`) runs every 6 hours. It fetches every card missing from the library at efhub's robots.txt pace of one card every 5 seconds. Popular types come first (Epic, Big Time, Highlight, Show Time, Trending), then the rest by OVR. It commits after each chunk and redeploys the site when it's done.
+- Players not loaded yet can still be added to a club from search. They show their name and OVR with a **Stats coming** tag, and their builds and squad picks unlock once the crawl reaches them.
+- Filling the full library (about 50,000 cards) takes roughly four days of runs. After that, each run only picks up newly released cards.
+- To start straight away, open **Actions → Prefetch cards → Run workflow**. You can limit the number of cards, set a minimum OVR, or change the delay.
+- Cards efhub can't serve (removed pages, missing stats) are parked in `public/data/cards/skip.json` and retried after 14 days.
+
+If a card isn't in the library yet, the app can still request it:
+
+1. Paste the card's efhub link. The app offers a **Request this card** link.
 2. That opens a GitHub issue titled `Add player <id>`. Submit it.
 3. The **Add player card** workflow fetches the card, commits it, redeploys the site, and closes the issue. This takes about a minute.
 

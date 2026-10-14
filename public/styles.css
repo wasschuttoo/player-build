@@ -145,6 +145,7 @@ input[type=search].field::-webkit-search-cancel-button{-webkit-appearance:none}
 .r-name{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r-meta{color:var(--text-2);font-size:.8125rem;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .r-tag{padding:3px 8px;border:1px solid var(--amber);border-radius:var(--r1);color:var(--amber);font:600 .6875rem/1.2 var(--body);text-transform:uppercase;letter-spacing:.06em;white-space:nowrap}
+.r-tag-quiet{border-color:var(--line-2);color:var(--text-2)}
 .results-empty,.result-none{padding:var(--s3);color:var(--text-2);font-size:.875rem}
 
 .st-photo{position:relative;width:72px;height:88px;flex:none;overflow:hidden;border-radius:var(--r1);background:var(--elevated)}
@@ -311,6 +312,10 @@ summary:hover{color:var(--amber-hi)}
 .slot-error .slot-title{color:var(--red)}
 .slot-title{font:800 1.5rem/1.1 var(--display);text-transform:uppercase;letter-spacing:.02em}
 .slot-note{max-width:44ch;color:var(--text-2);font-size:.875rem}
+.slot-waiting{border-color:var(--amber);border-style:solid}
+.slot-name{min-height:1.1em;font:800 1.5rem/1.1 var(--display);text-transform:uppercase;letter-spacing:.02em}
+.slot-actions{display:flex;flex-wrap:wrap;justify-content:center;gap:var(--s2);margin-top:var(--s2)}
+.slot-note:empty{display:none}
 .slot-spinner{width:28px;height:28px;border:3px solid var(--line-2);border-top-color:var(--amber);border-radius:50%;animation:spin .9s linear infinite}
 .slot-empty{place-content:center stretch;justify-items:center}
 .picks{display:grid;gap:var(--s2);width:100%;max-width:560px;margin-top:var(--s4);text-align:left}
@@ -482,6 +487,79 @@ body[data-view=squad] .finder,body[data-view=squad] #findToggle,body[data-view=h
 .mini.is-empty:hover{background:var(--amber-soft)}
 .mini-plus{color:var(--text-2);font:400 1.375rem/1 var(--body)}
 .mini.is-empty:hover .mini-plus{color:var(--amber)}
+.mini-pos{display:inline-flex;align-items:center;gap:3px}
+.mini-style{overflow:hidden;color:var(--text-2);font:500 .625rem/1.2 var(--body);text-overflow:ellipsis;white-space:nowrap}
+.mini.is-static,.mini.is-static:hover{cursor:default;border-color:var(--line-2);background:rgba(11,14,19,.55)}
+.mini.is-static:hover .mini-plus{color:var(--text-2)}
+.pitch-wait{position:absolute;inset:0;z-index:2;display:grid;place-items:center;margin:0;padding:var(--s6);color:var(--text-2);font-size:.875rem;line-height:1.45;text-align:center}
+.pitch[data-phase=def]{background-color:#0E1418}
+
+/* Compatibility dot: role and playstyle fit for the place */
+.cdot{flex:none;width:8px;height:8px;border-radius:50%;background:var(--dim)}
+.cdot-ideal{background:var(--green)}
+.cdot-good{background:var(--b1)}
+.cdot-ok{background:var(--text-2)}
+.cdot-poor{background:var(--red)}
+.cdot-unknown{background:transparent;box-shadow:inset 0 0 0 1.5px var(--dim)}
+
+/* Fluid formation switch */
+.switch{position:relative;display:inline-flex;align-items:center;align-self:end;gap:var(--s2);min-height:44px;cursor:pointer;font:600 .875rem/1.2 var(--body)}
+.switch input{position:absolute;width:1px;height:1px;margin:0;opacity:0}
+.switch-track{position:relative;flex:none;width:40px;height:24px;border:1px solid var(--line-2);border-radius:999px;background:var(--elevated);transition:background-color .2s var(--ease),border-color .2s var(--ease)}
+.switch-track::after{content:'';position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--text-2);transition:translate .2s var(--ease),background-color .2s var(--ease)}
+.switch:hover .switch-track{border-color:var(--amber)}
+.switch input:checked+.switch-track{border-color:var(--amber);background:var(--amber)}
+.switch input:checked+.switch-track::after{translate:16px 0;background:var(--amber-ink)}
+.switch input:focus-visible+.switch-track{outline:2px solid var(--amber);outline-offset:2px}
+.switch-text{color:var(--text)}
+
+.sq-phase{display:grid;grid-template-columns:1fr 1fr;gap:4px;width:100%;max-width:520px;margin-inline:auto;padding:4px;border:1px solid var(--line);border-radius:var(--r2);background:var(--surface)}
+.sq-phase [role=tab]{display:inline-flex;align-items:center;justify-content:center;min-height:44px;border:1px solid transparent;border-radius:var(--r1);background:none;color:var(--text-2);font:600 .8125rem/1 var(--body);text-transform:uppercase;letter-spacing:.06em;transition:color .2s var(--ease),background-color .2s var(--ease)}
+.sq-phase [role=tab]:hover{color:var(--text)}
+.sq-phase [aria-selected=true]{border-color:var(--amber);background:var(--amber-soft);color:var(--amber)}
+
+/* Meta shapes */
+.sq-metas{display:grid;gap:var(--s2)}
+.sq-metas-title{font:900 1.375rem/1 var(--display);text-transform:uppercase;letter-spacing:.01em}
+.sq-metas-sub{color:var(--text-2);font-size:.8125rem;line-height:1.45}
+.meta-list{display:grid;gap:var(--s2);margin-top:var(--s1)}
+.meta-chip{display:grid;gap:4px;width:100%;padding:var(--s3);border:1px solid var(--line);border-radius:var(--r3);background:var(--surface);text-align:left;transition:border-color .2s var(--ease),background-color .2s var(--ease)}
+button.meta-chip:hover{border-color:var(--line-2);background:var(--elevated)}
+.meta-chip[aria-pressed=true]{border-color:var(--amber);background:var(--amber-soft)}
+.meta-chip.is-loading{min-height:72px;background:linear-gradient(90deg,var(--surface) 30%,var(--elevated) 50%,var(--surface) 70%) 0 0/300% 100%;animation:shimmer 1.4s linear infinite}
+.meta-top{display:flex;align-items:baseline;justify-content:space-between;gap:var(--s3)}
+.meta-shape{font:900 1.5rem/1 var(--display);font-variant-numeric:tabular-nums;letter-spacing:.01em}
+.meta-chip[aria-pressed=true] .meta-shape{color:var(--amber)}
+.meta-avg{color:var(--amber);font:900 1.25rem/1 var(--display);font-variant-numeric:tabular-nums}
+.meta-tac,.meta-why{color:var(--text-2);font-size:.8125rem;line-height:1.4}
+.meta-tac{color:var(--text);font-weight:600}
+.meta-empty{padding:var(--s4);border:1px dashed var(--line-2);border-radius:var(--r3);color:var(--text-2);font-size:.875rem;line-height:1.45}
+
+/* Squad summary: stats, notes, builds */
+.sq-stats{display:flex;flex-wrap:wrap;gap:var(--s3) var(--s5)}
+.sq-stat{display:grid;gap:4px;margin:0}
+.sq-stat-n{font:900 1.5rem/1 var(--display);font-variant-numeric:tabular-nums}
+.sq-stat-l{color:var(--text-2);font-size:.75rem;line-height:1.2}
+.sq-stat.is-good .sq-stat-n{color:var(--green)}
+.sq-stat.is-warn .sq-stat-n{color:var(--red)}
+.sq-notes{display:grid;gap:6px;padding-top:var(--s2);border-top:1px solid var(--line)}
+.sq-note{position:relative;padding-left:var(--s4);font-size:.8125rem;line-height:1.45}
+.sq-note::before{content:'';position:absolute;top:.5em;left:2px;width:6px;height:6px;border-radius:50%;background:var(--text-2)}
+.sq-note.is-good::before{background:var(--green)}
+.sq-note.is-warn::before{background:var(--amber)}
+.sq-builds{border-top:1px solid var(--line)}
+.sq-build-list{display:grid;gap:4px;padding-bottom:var(--s2)}
+.bchip{display:grid;grid-template-columns:2.75rem minmax(0,auto) minmax(0,1fr) auto;align-items:center;gap:var(--s2);width:100%;min-height:44px;padding:var(--s2) var(--s3);border:1px solid var(--line);border-radius:var(--r2);background:var(--bg);text-align:left;transition:border-color .2s var(--ease)}
+.bchip:hover{border-color:var(--amber)}
+.bchip-pos{color:var(--text-2);font:700 .6875rem/1 var(--body);letter-spacing:.04em}
+.bchip-name{overflow:hidden;font:600 .875rem/1.2 var(--body);text-overflow:ellipsis;white-space:nowrap}
+.bchip-title{overflow:hidden;color:var(--text-2);font-size:.75rem;text-overflow:ellipsis;white-space:nowrap}
+.bchip-ovr{color:var(--amber);font:900 1.125rem/1 var(--display);font-variant-numeric:tabular-nums}
+
+/* Option rows: playstyle and skills */
+.opt-style{display:flex;align-items:center;gap:6px;color:var(--text-2);font-size:.8125rem;line-height:1.35}
+.opt-skills{display:flex;flex-wrap:wrap;gap:4px}
+.skill{display:inline-block;padding:2px 7px;border:1px solid var(--line-2);border-radius:999px;background:var(--elevated);color:var(--text);font:500 .6875rem/1.35 var(--body);white-space:nowrap}
 
 .bench-wrap{display:grid;gap:var(--s3)}
 .bench-title{display:flex;align-items:center;gap:var(--s2);color:var(--text-2);font:600 .75rem/1.2 var(--body);text-transform:uppercase;letter-spacing:.08em}
@@ -581,10 +659,12 @@ body[data-view=squad] .finder,body[data-view=squad] #findToggle,body[data-view=h
 /* ---------- Motion: the card going up on the wall ---------- */
 @keyframes spin{to{transform:rotate(360deg)}}
 @keyframes place{from{opacity:0;translate:0 10px;scale:.96}to{opacity:1;translate:none;scale:none}}
+@keyframes shimmer{to{background-position:-150% 0}}
 .sticker.is-placing,.mini.is-placing{animation:place .42s var(--ease) both}
 @media (prefers-reduced-motion:reduce){
   html{scroll-behavior:auto}
   *,*::before,*::after{transition-duration:1ms!important}
   .sticker.is-placing,.mini.is-placing{animation-duration:1ms}
   .slot-spinner{animation-duration:2.4s}
+  .meta-chip.is-loading{animation:none}
 }

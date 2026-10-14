@@ -9,7 +9,7 @@ const CARD_IMG = id => `https://efimg.com/efootballhub22/images/mini-cards/mini-
 const CARD_IMG2 = id => `https://efimg.com/efootballhub22/images/player_cards/${id}_l.png`;
 const WIDE = window.matchMedia('(min-width: 960px)');
 const ENGINE = window.BA_ENGINE || null;
-const SLOW_NOTE = ENGINE ? "Cards come from Build Album's library; new ones are added on request." : 'efhub asks for 5 s between requests, so a new card can take a few seconds.';
+const SLOW_NOTE = ENGINE ? "Cards come from Build Album's library, which holds every efhub card and checks for new ones every 6 hours." : 'efhub asks for 5 s between requests, so a new card can take a few seconds.';
 
 const S = {
   tactics: [], mult: [], abilities: [], all: [], mine: [],
@@ -48,7 +48,8 @@ async function netApi(path, { method = 'GET', body, signal } = {}) {
   if (ENGINE) {
     if (signal?.aborted) throw abortErr();
     const u = new URL(path, location.origin);
-    const d = await ENGINE.handle(method, u.pathname, u.searchParams, body);
+    const work = ENGINE.handle(method, u.pathname, u.searchParams, body);
+    const d = await (signal ? Promise.race([work, new Promise((_, no) => signal.addEventListener('abort', () => no(abortErr()), { once: true }))]) : work);
     if (signal?.aborted) throw abortErr();
     return d;
   }
@@ -170,9 +171,9 @@ const local = {
     if (club.some(p => String(p.id) === id)) throw fail(`${sum.name || 'That card'} is already in your club.`, 409);
     club.push({ id, added: new Date().toISOString() });
     save(K.club, club);
-    keepCards({ [id]: card });
+    if (card) keepCards({ [id]: card });
     const { players } = await local['GET /api/club']();
-    return { players, name: sum.name, added: { id, name: sum.name } };
+    return { players, name: sum.name, added: { id, name: sum.name, waiting: !!sum.waiting } };
   },
   async 'DELETE /api/club'(q) {
     const club = listOf(K.club);
@@ -194,7 +195,10 @@ const local = {
     const saved = {
       id, name, formation: String(body.formation || ''),
       managerId: body.managerId == null ? null : String(body.managerId), tactic: body.tactic || null,
-      slots: ids(body.slots, 11), bench: ids(body.bench, LIMITS.bench), updated: new Date().toISOString(),
+      slots: ids(body.slots, 11), bench: ids(body.bench, LIMITS.bench),
+      fluid: !!body.fluid, defFormation: body.defFormation ? String(body.defFormation) : null,
+      defSlots: Array.isArray(body.defSlots) && body.defSlots.length === 11 ? ids(body.defSlots, 11) : null,
+      updated: new Date().toISOString(),
     };
     const i = squads.findIndex(s => s.id === id);
     if (i >= 0) squads[i] = saved; else squads.unshift(saved);
@@ -217,7 +221,7 @@ function prepare(route, body) {
   const cm = String(b.managerId || '').startsWith('custom-') && !b.manager ? listOf(K.managers).find(m => m.custom && String(m.id) === String(b.managerId)) : null;
   if (cm) b.manager = { id: String(cm.id), name: cm.name, skills: cm.skills, boosts: cm.boosts };
   const squadIds = [...(b.slots || []), ...(b.bench || [])];
-  if (route === '/api/squad/suggest' || route === '/api/squad/slot-options') {
+  if (route === '/api/squad/suggest' || route === '/api/squad/slot-options' || route === '/api/squad/meta') {
     b.club = clubIds();
     b.cards = cardsFor([...b.club, ...squadIds]);
   } else if (route === '/api/squad/evaluate') {
@@ -269,7 +273,6 @@ function toast(msg, kind = 'error', link = null) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => { t.hidden = true; }, link ? 15000 : kind === 'error' ? 7000 : 3500);
 }
-const requestLink = e => (e?.needsRequest ? { href: e.requestUrl, text: 'Request it on GitHub' } : null);
 
 const deaccent = s => String(s || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
 const initials = name => String(name || '?').split(/\s+/).map(w => w.replace(/[^A-Za-z]/g, '')[0]).filter(Boolean).slice(0, 2).join('').toUpperCase() || '?';
@@ -351,6 +354,7 @@ async function loadManagers() {
 }
 
 let buildCtrl, buildTimer;
+const BUILD_TIMEOUT = 30000;
 function scheduleBuild(delay = 150) {
   clearTimeout(buildTimer);
   buildTimer = setTimeout(() => build(), delay);
@@ -362,18 +366,33 @@ async function build({ newPlayer = false, refresh = false } = {}) {
   buildCtrl?.abort();
   const ctrl = buildCtrl = new AbortController();
   setBusy(true, newPlayer || !S.build);
+  let timedOut = false;
+  const guard = setTimeout(() => {
+    if (buildCtrl !== ctrl) return;
+    timedOut = true;
+    ctrl.abort();
+  }, BUILD_TIMEOUT);
   try {
     const d = await api('/api/build', {
       method: 'POST', signal: ctrl.signal,
       body: { id: S.playerId, level: S.level, pos: S.pos, managerId: S.managerId, tactic: S.tactic, stat: S.stat, refresh },
     });
+    if (buildCtrl !== ctrl) return;
     const placing = !S.build || S.build.card.id !== d.card.id;
     Object.assign(S, { build: d, playerId: d.card.id, level: d.level, pos: d.pos, tactic: d.tactic, stat: d.stat });
+    S.sel = Math.max(0, Math.min(S.sel, d.builds.length - 1));
     writeHash();
-    renderAll(placing);
+    try {
+      renderAll(placing);
+    } catch (err) {
+      console.error(err);
+      renderError("Couldn't draw this card. Try again.");
+    }
   } catch (e) {
-    if (e.name === 'AbortError') return;
-    if (/manager could not be found/i.test(e.message)) {
+    if (e.name === 'AbortError' && !timedOut) return;
+    if (buildCtrl !== ctrl) return;
+    const err = timedOut ? new Error('This card is taking too long to load. Check your connection and try again.') : e;
+    if (/manager could not be found/i.test(err.message)) {
       S.managerId = firstUsable()?.id || null;
       S.tactic = mgr(S.managerId)?.bestTactic || null;
       renderManager();
@@ -382,13 +401,32 @@ async function build({ newPlayer = false, refresh = false } = {}) {
       S.playerId = S.build.card.id;
       S.level = S.build.level;
       S.pos = S.build.pos;
+      writeHash();
       renderLevel();
-      toast(e.message, 'error', requestLink(e));
+      restoreSlot();
+      toast(err.message, 'error');
     } else {
-      renderError(e);
+      renderError(err);
     }
   } finally {
-    if (buildCtrl === ctrl) setBusy(false);
+    clearTimeout(guard);
+    if (buildCtrl === ctrl) {
+      buildCtrl = null;
+      setBusy(false);
+      if ($('#playerSlot .slot-loading')) restoreSlot();
+    }
+  }
+}
+
+// Put the current card back in the slot after a failed or abandoned rebuild.
+function restoreSlot() {
+  if (!S.build) return renderError("Couldn't load this card. Try again.");
+  S.sel = Math.max(0, Math.min(S.sel, S.build.builds.length - 1));
+  try {
+    renderSticker(false);
+  } catch (err) {
+    console.error(err);
+    renderError("Couldn't draw this card. Try again.");
   }
 }
 
@@ -498,13 +536,50 @@ function renderLoading() {
 }
 
 function renderError(err) {
+  if (err?.notInLibrary) return renderWaiting(err);
   const message = typeof err === 'string' ? err : err?.message || 'Something went wrong. Try again.';
   $('#playerSlot').replaceChildren(h('div', { class: 'slot slot-error', role: 'alert' },
-    h('p', { class: 'slot-title', text: err?.needsRequest ? 'Not in Build Album yet' : "Couldn't load this card" }),
+    h('p', { class: 'slot-title', text: "Couldn't load this card" }),
     h('p', { class: 'slot-note', text: message }),
-    err?.needsRequest
-      ? h('a', { class: 'btn btn-stick', href: err.requestUrl, target: '_blank', rel: 'noopener' }, 'Request this card on GitHub')
-      : h('button', { class: 'btn btn-stick', type: 'button', onclick: () => build({ newPlayer: true }) }, 'Try again')));
+    h('button', { class: 'btn btn-stick', type: 'button', onclick: () => build({ newPlayer: true }) }, 'Try again')));
+}
+
+// A real efhub card the library hasn't loaded yet: name it, and let the user keep it in their club.
+async function renderWaiting(err) {
+  const id = String(err.id || '');
+  const inClub = () => listOf(K.club).some(p => String(p.id) === id);
+  const name = h('p', { class: 'slot-name' });
+  const status = h('p', { class: 'slot-note', role: 'status' });
+  const add = h('button', { class: 'btn btn-stick', type: 'button' }, inClub() ? 'In your club' : 'Add to club');
+  add.disabled = inClub();
+  add.addEventListener('click', async () => {
+    add.disabled = true;
+    status.textContent = 'Adding…';
+    try {
+      const r = await api('/api/club', { method: 'POST', body: { id } });
+      SQ.club = r.players || [];
+      renderClubCount();
+      if (SQ.open) renderSquad();
+      add.textContent = 'In your club';
+      status.textContent = `${r.name || 'The card'} is in your club. It joins squads once its stats load.`;
+    } catch (e) {
+      status.textContent = e.message;
+      add.disabled = inClub();
+    }
+  });
+  const another = h('button', { class: 'btn btn-print', type: 'button', onclick: () => { const f = $('#findInput'); f.value = ''; f.focus(); } }, 'Try another card');
+  const slot = h('div', { class: 'slot slot-waiting', role: 'status' },
+    h('span', { class: 'r-tag r-tag-quiet', text: 'Adding automatically' }),
+    name,
+    h('p', { class: 'slot-note', text: 'Build Album pulls in new efhub cards on its own every half hour, popular types first. Add it to your club now and its builds unlock as soon as it lands.' }),
+    h('div', { class: 'slot-actions' }, add, another),
+    status);
+  $('#playerSlot').replaceChildren(slot);
+  try {
+    const s = await netApi('/api/card-summary', { method: 'POST', body: { id } });
+    if (slot.isConnected && s?.name) name.textContent = s.ovr ? `${s.name} · ${s.ovr} OVR` : s.name;
+  } catch {}
+  if (!name.textContent) name.textContent = `efhub card ${id}`;
 }
 
 async function renderEmpty() {
@@ -1220,8 +1295,11 @@ const SQ = {
   formations: [], club: [], squads: [], draft: null, result: null, open: false,
   ctrl: null, timer: null, mode: 'club', ctx: null, searchCtrl: null, searchTimer: null,
   placing: new Set(), undo: null, stash: null, anchor: null,
+  phase: 'att', meta: null, metaKey: null, metaTimer: null, metaCtrl: null,
 };
 const lineupKey = d => JSON.stringify([d.formation, d.slots, d.bench]);
+const DEF_EXTRA = ['4-5-1', '5-3-2', '5-2-1-2'];
+const COMPAT_TEXT = { ideal: 'Ideal role', good: 'Good role', ok: 'Can cover', poor: 'Out of role', unknown: 'No style data' };
 
 const PARTICLES = new Set(['de', 'da', 'di', 'do', 'dos', 'du', 'van', 'von', 'der', 'den', 'del', 'la', 'le', 'ter']);
 // Same rules as customFormation() in server.js: 3–5 lines of 1–5 players, defence first, adding up to 10.
@@ -1277,8 +1355,12 @@ const listJoin = arr => {
 const canPlay = (c, pos) => !!c && (c.position === pos || (c.positions || []).some(x => x.pos === pos && x.fit !== 'off'));
 const sqBody = () => {
   const d = SQ.draft;
-  return { formation: d.formation, tactic: d.tactic, managerId: d.managerId, slots: d.slots, bench: d.bench };
+  return {
+    formation: d.formation, tactic: d.tactic, managerId: d.managerId, slots: d.slots, bench: d.bench,
+    fluid: !!(d.fluid && d.defFormation), defFormation: d.fluid ? d.defFormation : null, defSlots: d.fluid ? d.defSlots : null,
+  };
 };
+const knownFormation = key => !!key && (SQ.formations.some(f => f.key === key) || !!customFormation(key));
 
 function blankDraft(formation) {
   const f = formationOf(formation || SQ.draft?.formation);
@@ -1288,6 +1370,7 @@ function blankDraft(formation) {
     id: null, name: '', formation: f.key, managerId: m?.id || null,
     tactic: own && S.tactic ? S.tactic : m?.bestTactic || S.tactics[0]?.key,
     slots: Array(f.slots.length).fill(null), bench: [],
+    fluid: false, defFormation: null, defSlots: null,
   };
 }
 
@@ -1307,6 +1390,9 @@ function normDraft(d) {
     managerId: fallback?.id || null,
     tactic: m && valid ? d.tactic : fallback?.bestTactic || (valid ? d.tactic : S.tactics[0]?.key),
     slots, bench,
+    fluid: !!d.fluid,
+    defFormation: knownFormation(d.defFormation) ? formationOf(d.defFormation).key : null,
+    defSlots: Array.isArray(d.defSlots) && d.defSlots.length === 11 ? d.defSlots.map(x => (x ? String(x) : null)) : null,
   };
 }
 
@@ -1327,9 +1413,18 @@ async function loadSquadData() {
   SQ.squads = squads.squads || [];
   $('#sqFormation').replaceChildren(...formations.map(f => h('option', { value: f.key, text: f.key })),
     h('option', { value: '__custom', text: 'Type your own…' }));
+  fillDefFormations();
   loadDraft();
   renderSaved();
   renderClubCount();
+}
+
+function fillDefFormations(extra) {
+  const keys = [...new Set([...SQ.formations.map(f => f.key), ...DEF_EXTRA, ...(extra ? [extra] : [])])];
+  const sel = $('#sqDefFormation');
+  const cur = sel.value;
+  sel.replaceChildren(...keys.map(k => h('option', { value: k, text: k })));
+  if (keys.includes(cur)) sel.value = cur;
 }
 
 function renderSaved() {
@@ -1444,7 +1539,7 @@ function showView(v) {
   setFinder(false);
   if (v !== 'home') hideHomeResults();
   writeHash();
-  if (squad) { renderSquad(); evaluate(0); }
+  if (squad) { renderSquad(); evaluate(0); fetchMeta(); }
   else if (v === 'home') renderHome();
   else revealChecked($('#playstyles'));
 }
@@ -1475,7 +1570,7 @@ async function runEvaluate() {
       evaluate(0);
       return;
     }
-    toast(e.message, 'error', requestLink(e));
+    toast(e.message, 'error');
   } finally {
     if (SQ.ctrl === ctrl) { SQ.ctrl = null; $('#squad').removeAttribute('aria-busy'); }
   }
@@ -1483,7 +1578,9 @@ async function runEvaluate() {
 
 function commit() {
   SQ.undo = null;
-  if (SQ.anchor && SQ.anchor.out !== lineupKey(SQ.draft)) SQ.anchor = null;
+  const d = SQ.draft;
+  if (SQ.anchor && SQ.anchor.out !== lineupKey(d)) SQ.anchor = null;
+  if (d.defSlots && d.defSlots.filter(Boolean).sort().join() !== d.slots.filter(Boolean).sort().join()) d.defSlots = null;
   saveDraft();
   renderSquad();
   evaluate();
@@ -1494,10 +1591,13 @@ function renderSquad() {
   if (!d || !SQ.formations.length) return;
   keepFocus(() => {
     renderSquadManager();
+    renderFluid();
     renderPitch();
     renderBench();
     renderSummary();
+    renderMeta();
   });
+  fetchMeta();
   renderClubCount();
   $('#squadTitle').textContent = d.name.trim() || 'Squad';
   $('#sqSub').textContent = !SQ.club.length
@@ -1518,6 +1618,129 @@ function syncFormationSelect(key) {
     sel.insertBefore(h('option', { value: key, text: `${key} (custom)`, dataset: { custom: '1' } }), sel.querySelector('option[value="__custom"]'));
   }
   sel.value = key;
+}
+
+// ---------------------------------------------------------------- fluid formation
+function renderFluid() {
+  const d = SQ.draft;
+  const on = !!(d.fluid && d.defFormation);
+  $('#sqFluid').checked = on;
+  $('#sqDefFormationRow').hidden = !on;
+  $('#sqPhase').hidden = !on;
+  if (!on) SQ.phase = 'att';
+  if (on) {
+    const sel = $('#sqDefFormation');
+    const key = formationOf(d.defFormation).key;
+    if (![...sel.options].some(o => o.value === key)) fillDefFormations(key);
+    sel.value = key;
+    $('#sqPhaseAtt').textContent = `Attacking ${d.formation}`;
+    $('#sqPhaseDef').textContent = `Defending ${key}`;
+  }
+  for (const [id, ph] of [['#sqPhaseAtt', 'att'], ['#sqPhaseDef', 'def']]) {
+    const b = $(id);
+    b.setAttribute('aria-selected', String(SQ.phase === ph));
+    b.tabIndex = SQ.phase === ph ? 0 : -1;
+  }
+}
+
+function setFluid(on) {
+  const d = SQ.draft;
+  d.fluid = on;
+  if (on && !d.defFormation) {
+    const pick = SQ.meta?.picks?.find(p => p.formation === d.formation && p.tactic === d.tactic) || SQ.meta?.picks?.find(p => p.formation === d.formation);
+    d.defFormation = pick?.defFormation || d.formation;
+  }
+  d.defSlots = null;
+  SQ.phase = 'att';
+  commit();
+}
+
+function setDefFormation(key) {
+  const d = SQ.draft;
+  if (!knownFormation(key)) return;
+  d.defFormation = formationOf(key).key;
+  d.defSlots = null;
+  commit();
+}
+
+function setPhase(ph, focus) {
+  if (SQ.phase === ph) return;
+  SQ.phase = ph;
+  renderFluid();
+  renderPitch();
+  if (focus) $(ph === 'def' ? '#sqPhaseDef' : '#sqPhaseAtt').focus();
+}
+
+// ---------------------------------------------------------------- meta shapes
+function fetchMeta(delay = 400) {
+  const d = SQ.draft;
+  if (!d || !SQ.formations.length) return;
+  const key = `${d.managerId || ''}|${SQ.club.length}`;
+  if (SQ.metaKey === key && (SQ.meta || SQ.metaCtrl)) return;
+  clearTimeout(SQ.metaTimer);
+  SQ.metaTimer = setTimeout(async () => {
+    SQ.metaCtrl?.abort();
+    const ctrl = SQ.metaCtrl = new AbortController();
+    SQ.metaKey = key;
+    SQ.meta = null;
+    renderMeta();
+    try {
+      SQ.meta = await api('/api/squad/meta', { method: 'POST', body: { managerId: d.managerId }, signal: ctrl.signal });
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      SQ.meta = { picks: [], error: true };
+    } finally {
+      if (SQ.metaCtrl === ctrl) SQ.metaCtrl = null;
+    }
+    keepFocus(renderMeta);
+  }, delay);
+}
+
+function renderMeta() {
+  const box = $('#sqMetaList');
+  const d = SQ.draft;
+  const m = usableMgr(d.managerId);
+  $('#sqMetaSub').textContent = m
+    ? `Shapes that suit ${surname(m.name)}'s strongest playstyles${SQ.club.length >= 11 ? ', rated on your club' : ''}.`
+    : 'The shapes top players use for each playstyle. Pick a manager to narrow them down.';
+  if (!SQ.meta) {
+    box.setAttribute('aria-busy', 'true');
+    box.replaceChildren(...[0, 1, 2].map(() => h('li', { class: 'meta-chip is-loading', 'aria-hidden': 'true' })));
+    return;
+  }
+  box.removeAttribute('aria-busy');
+  if (SQ.meta.error || !SQ.meta.picks?.length) {
+    box.replaceChildren(h('li', { class: 'meta-empty' }, "Couldn't rate the meta shapes right now. ",
+      h('button', { type: 'button', class: 'linkish', onclick: () => { SQ.metaKey = null; fetchMeta(0); } }, 'Try again')));
+    return;
+  }
+  box.replaceChildren(...SQ.meta.picks.map((p, i) => {
+    const live = p.formation === d.formation && p.tactic === d.tactic && (p.defFormation === p.formation ? !d.fluid : d.fluid && d.defFormation === p.defFormation);
+    const shape = p.defFormation && p.defFormation !== p.formation ? `${p.formation} → ${p.defFormation}` : p.formation;
+    return h('li', {}, h('button', {
+      type: 'button', class: 'meta-chip', 'aria-pressed': String(live), dataset: { fk: `meta-${i}` },
+      onclick: () => applyMeta(p),
+    },
+    h('span', { class: 'meta-top' },
+      h('span', { class: 'meta-shape', text: shape }),
+      p.avg != null ? h('span', { class: 'meta-avg' }, h('span', { class: 'vh', text: 'eleven average ' }), p.avg.toFixed(1)) : null),
+    h('span', { class: 'meta-tac' }, p.tacticLabel || tacLabel(p.tactic), p.proficiency != null ? ` · ${p.proficiency}` : '',
+      p.chemistry != null ? ` · ${p.chemistry}% chemistry` : ''),
+    h('span', { class: 'meta-why', text: p.reason })));
+  }));
+}
+
+async function applyMeta(p) {
+  const d = SQ.draft;
+  d.tactic = p.tactic;
+  d.fluid = !!p.defFormation && p.defFormation !== p.formation;
+  d.defFormation = d.fluid ? p.defFormation : null;
+  d.defSlots = null;
+  SQ.phase = 'att';
+  if (d.formation !== formationOf(p.formation).key) changeFormation(p.formation);
+  else commit();
+  toast(`${p.formation}${d.fluid ? ` attacking, ${p.defFormation} defending` : ''} with ${p.tacticLabel || tacLabel(p.tactic)}.`, 'info');
+  if (SQ.club.length) await suggestXI();
 }
 
 function setCustomForm(open) {
@@ -1616,12 +1839,57 @@ function slotView(i) {
   return { id, pos, name: c?.name, pending: true, fit: c && !canPlay(c, pos) ? 'off' : null };
 }
 
+function compatDot(c) {
+  if (!c) return null;
+  return h('span', { class: `cdot cdot-${c.label}`, title: c.why || COMPAT_TEXT[c.label], 'aria-hidden': 'true' });
+}
+
+const styleShort = s => (s && s !== 'None' ? s : '');
+
+function defView() {
+  const d = SQ.draft;
+  const def = SQ.result?.def;
+  if (!d.fluid || !d.defFormation || !def || SQ.result.formation !== d.formation) return null;
+  if (def.formation !== formationOf(d.defFormation).key) return null;
+  return def;
+}
+
 function renderPitch() {
   const d = SQ.draft;
-  const f = formationOf(d.formation);
-  $('#pitch').replaceChildren(
-    h('div', { class: 'pitch-lines', 'aria-hidden': 'true' },
-      h('span', { class: 'pl-half' }), h('span', { class: 'pl-circle' }), h('span', { class: 'pl-box-top' }), h('span', { class: 'pl-box-bot' })),
+  const defPhase = d.fluid && d.defFormation && SQ.phase === 'def';
+  const f = formationOf(defPhase ? d.defFormation : d.formation);
+  const lines = h('div', { class: 'pitch-lines', 'aria-hidden': 'true' },
+    h('span', { class: 'pl-half' }), h('span', { class: 'pl-circle' }), h('span', { class: 'pl-box-top' }), h('span', { class: 'pl-box-bot' }));
+  const pitch = $('#pitch');
+  pitch.dataset.phase = defPhase ? 'def' : 'att';
+  pitch.setAttribute('aria-label', defPhase ? `Defensive shape, ${f.key}` : `Attacking shape, ${f.key}`);
+  if (defPhase) {
+    const def = defView();
+    if (!def) {
+      pitch.replaceChildren(lines, h('p', { class: 'pitch-wait', role: 'status' },
+        d.slots.some(Boolean) ? 'Rating the defensive shape…' : 'Fill the eleven first, then see how it drops into shape.'));
+      return;
+    }
+    pitch.replaceChildren(lines, ...f.slots.map((slot, i) => {
+      const v = def.slots[i];
+      const style = `left:${slot.x}%;top:${slot.y}%`;
+      if (!v || v.missing) {
+        return h('span', { class: 'mini is-empty is-static', style },
+          h('span', { class: 'mini-pos', text: slot.pos }));
+      }
+      const off = v.fit === 'off';
+      return h('button', {
+        type: 'button', class: `mini${off ? ' is-off' : ''}`, style, dataset: { fk: `def-${i}` },
+        'aria-label': `${slot.pos}: ${v.name}, ${v.ovr}${v.compat ? `, ${COMPAT_TEXT[v.compat.label]}` : ''}. See the build`,
+        onclick: () => seeBuild(v.id, slot.pos),
+      },
+      h('span', { class: 'mini-top' }, h('span', { class: 'mini-ovr', text: String(v.ovr) }), h('span', { class: 'mini-pos' }, compatDot(v.compat), slot.pos)),
+      h('span', { class: 'mini-name', text: surname(v.name) }),
+      styleShort(v.playingStyleDefensive || v.playingStyle) ? h('span', { class: 'mini-style', text: styleShort(v.playingStyleDefensive || v.playingStyle) }) : null);
+    }));
+    return;
+  }
+  pitch.replaceChildren(lines,
     ...f.slots.map((slot, i) => {
       const v = slotView(i);
       const style = `left:${slot.x}%;top:${slot.y}%`;
@@ -1634,17 +1902,20 @@ function renderPitch() {
       const anim = SQ.placing.has(i) && !v.pending;
       if (anim) SQ.placing.delete(i);
       const off = v.fit === 'off';
-      const ovr = v.missing ? '–' : v.pending ? '··' : v.ovr;
-      const label = v.missing
+      const ovr = v.waiting ? v.ovr : v.missing ? '–' : v.pending ? '··' : v.ovr;
+      const ps = styleShort(v.playingStyle);
+      const label = v.waiting
+        ? `${slot.pos}: ${v.name}, ${v.ovr}, stats still loading into the library. Change player`
+        : v.missing
         ? `${slot.pos}: this card is unavailable. Change player`
-        : `${slot.pos}: ${v.name || 'player'}${v.pending ? ', rating loading' : `, ${v.ovr}`}${off ? ', off position' : ''}. Change player`;
+        : `${slot.pos}: ${v.name || 'player'}${v.pending ? ', rating loading' : `, ${v.ovr}`}${ps ? `, ${ps}` : ''}${v.compat ? `, ${COMPAT_TEXT[v.compat.label]}` : ''}${off ? ', off position' : ''}. Change player`;
       return h('button', {
         type: 'button', class: `mini${off ? ' is-off' : ''}${anim ? ' is-placing' : ''}`, style,
         dataset: { fk: `slot-${i}` }, 'aria-label': label, onclick: () => openClub('slot', { i }),
       },
-      h('span', { class: 'mini-top' }, h('span', { class: 'mini-ovr', text: String(ovr) }), h('span', { class: 'mini-pos', text: slot.pos })),
-      h('span', { class: 'mini-name', text: v.missing ? 'Unavailable' : surname(v.name) || 'Player' }),
-      off ? h('span', { class: 'mini-off', text: 'Off position' }) : null);
+      h('span', { class: 'mini-top' }, h('span', { class: 'mini-ovr', text: String(ovr) }), h('span', { class: 'mini-pos' }, compatDot(v.compat), slot.pos)),
+      h('span', { class: 'mini-name', text: v.waiting ? surname(v.name) : v.missing ? 'Unavailable' : surname(v.name) || 'Player' }),
+      v.waiting ? h('span', { class: 'mini-style', text: 'Stats coming' }) : off ? h('span', { class: 'mini-off', text: 'Off position' }) : ps ? h('span', { class: 'mini-style', text: ps }) : null);
     }));
 }
 
@@ -1656,7 +1927,7 @@ function renderBench() {
     const c = clubCard(id);
     const name = r?.name || c?.name;
     const pos = r?.pos || c?.position || '';
-    const ovr = r ? (r.missing ? '–' : r.ovr) : '··';
+    const ovr = r ? (r.waiting ? r.ovr : r.missing ? '–' : r.ovr) : '··';
     return h('li', {}, h('button', {
       type: 'button', class: 'mini mini-bench', dataset: { fk: `bench-${i}` },
       'aria-label': name ? `Bench: ${name}, ${pos}${r && !r.missing ? `, ${r.ovr}` : ''}. Change player` : 'Bench: card unavailable. Change player',
@@ -1680,16 +1951,39 @@ function renderSummary() {
   const r = SQ.result;
   const filled = d.slots.filter(Boolean).length;
   const m = usableMgr(d.managerId);
-  const avg = r && r.formation === d.formation && filled ? r.avg : null;
+  const fresh = r && r.formation === d.formation && filled;
+  const avg = fresh ? r.avg : null;
+  const chem = fresh ? r.chemistry : null;
+  const def = fresh ? defView() : null;
   const prof = m?.skills?.[d.tactic];
   const meta = filled
     ? `${filled} of ${d.slots.length} places filled · ${m ? `${surname(m.name)}, ` : ''}${tacLabel(d.tactic)}${prof != null ? ` ${pct(multOf(prof))}` : ''}`
     : SQ.club.length ? 'Tap a place on the pitch, or ask for the best eleven.' : 'Add your cards first, then pick a team.';
+  const stat = (n, label, cls = '') => h('p', { class: `sq-stat ${cls}` },
+    h('span', { class: 'sq-stat-n', text: n }), h('span', { class: 'sq-stat-l', text: label }));
+  const stats = [];
+  if (chem != null) stats.push(stat(`${chem}%`, 'Chemistry', chem >= 75 ? 'is-good' : chem < 50 ? 'is-warn' : ''));
+  if (def?.avg != null) stats.push(stat(def.avg.toFixed(1), `Defending ${def.formation}`));
+  if (def?.chemistry != null) stats.push(stat(`${def.chemistry}%`, 'Defensive fit'));
+  const notes = fresh ? (r.notes || []) : [];
+  const builds = fresh ? (r.slots || []).filter(s => s?.build && !s.missing) : [];
   $('#sqSummary').replaceChildren(
     h('p', { class: 'sq-avg' },
       h('span', { class: 'sq-avg-n', dataset: avg != null ? null : { empty: 'true' }, text: avg != null ? avg.toFixed(1) : '–' }),
       h('span', { class: 'sq-avg-l', text: 'XI average' })),
+    stats.length ? h('div', { class: 'sq-stats' }, ...stats) : null,
     h('p', { class: 'sq-meta', text: meta }),
+    notes.length ? h('ul', { class: 'sq-notes', 'aria-label': 'How the eleven fits together' },
+      ...notes.map(n => h('li', { class: `sq-note is-${n.tone}` },
+        h('span', { class: 'vh', text: n.tone === 'good' ? 'Strength: ' : 'Watch: ' }), n.text))) : null,
+    builds.length ? h('details', { class: 'sq-builds', open: !!SQ.buildsOpen, ontoggle: e => { SQ.buildsOpen = e.currentTarget.open; } },
+      h('summary', { dataset: { fk: 'sq-builds' } }, `Builds for this eleven (${builds.length})`),
+      h('ul', { class: 'sq-build-list' }, ...builds.map(s => h('li', {},
+        h('button', { type: 'button', class: 'bchip', dataset: { fk: `build-${s.id}-${s.pos}` }, onclick: () => seeBuild(s.id, s.pos) },
+          h('span', { class: 'bchip-pos', text: s.pos }),
+          h('span', { class: 'bchip-name', text: surname(s.name) }),
+          h('span', { class: 'bchip-title', text: s.build.title }),
+          h('span', { class: 'bchip-ovr', text: String(s.build.ovr) })))))) : null,
     ...(SQ.undo ? [h('button', { type: 'button', class: 'linkish sq-undo', dataset: { fk: 'sq-undo' }, onclick: undoSuggest }, 'Undo the suggestion')] : []));
 }
 
@@ -1720,10 +2014,9 @@ function tapAgain(btn, armedText, fn) {
 }
 
 // ---------------------------------------------------------------- club sheet
-function setClubMsg(text, kind = '', err = null) {
+function setClubMsg(text, kind = '') {
   const p = $('#clubMsg');
   p.textContent = text;
-  if (err?.needsRequest) p.append(' ', h('a', { href: err.requestUrl, target: '_blank', rel: 'noopener' }, 'Request it on GitHub'));
   if (kind) p.dataset.kind = kind; else delete p.dataset.kind;
 }
 
@@ -1805,6 +2098,15 @@ function ovrBadge(n) {
 }
 
 function clubRow(p) {
+  if (p.waiting) {
+    return h('li', { class: 'mgr-row club-row is-waiting' },
+      cardPhoto(p.id),
+      ovrBadge(p.baseOvr),
+      h('div', { class: 'mgr-info' },
+        h('p', { class: 'mgr-row-name' }, p.name || 'Player', ' ', h('span', { class: 'tag tag-quiet', text: 'Stats coming' })),
+        h('p', { class: 'mgr-note', text: 'Waiting for the library to load this card. Builds and squad picks unlock automatically.' })),
+      h('div', { class: 'row-actions' }, removeBtn(p)));
+  }
   if (p.missing) {
     return h('li', { class: 'mgr-row club-row' },
       cardPhoto(p.id),
@@ -1837,11 +2139,19 @@ function optionRow(o, pos) {
   const at = whereIs(o.id);
   const twin = !at && o.person && [...SQ.draft.slots, ...SQ.draft.bench].some(id => id && clubCard(id)?.person === o.person);
   const note = [o.type, whereText(at), twin ? 'Swaps out the version in your squad' : ''].filter(Boolean).join(' · ');
+  const style = styleShort(o.playingStyle);
+  const c = o.compat;
+  const skills = (o.skills || []).slice(0, 3);
   return h('li', { class: `mgr-row club-row opt-row${o.fit === 'off' ? ' is-off' : ''}` },
     cardPhoto(o.id),
     ovrBadge(o.ovr),
     h('div', { class: 'mgr-info' },
       h('p', { class: 'mgr-row-name' }, o.name, ' ', h('span', { class: o.fit === 'off' ? 'tag' : 'tag tag-quiet', text: FIT_LABEL[o.fit] || '' })),
+      style || c ? h('p', { class: 'opt-style' },
+        c ? compatDot(c) : null,
+        h('span', { text: [style, c ? COMPAT_TEXT[c.label] : ''].filter(Boolean).join(' · ') }),
+        c?.why ? h('span', { class: 'vh', text: `. ${c.why}` }) : null) : null,
+      skills.length ? h('p', { class: 'opt-skills' }, ...skills.map(s => h('span', { class: 'skill', text: s }))) : null,
       h('p', { class: 'mgr-note', text: note || `${o.ovr} at ${pos} with their best build` })),
     h('button', {
       type: 'button', class: 'opt-go', dataset: { fk: `row-${o.id}` },
@@ -1861,7 +2171,7 @@ async function renderClubList() {
     try {
       opts = await api('/api/squad/slot-options', { method: 'POST', body: { pos, managerId: d.managerId, tactic: d.tactic } });
     } catch (e) {
-      setClubMsg(e.message, 'error', e);
+      setClubMsg(e.message, 'error');
       return;
     } finally {
       list.removeAttribute('aria-busy');
@@ -1941,7 +2251,7 @@ async function removeFromClub(p, btn) {
     $('#clubInput').focus();
   } catch (e) {
     btn.disabled = false;
-    setClubMsg(e.message, 'error', e);
+    setClubMsg(e.message, 'error');
   }
 }
 
@@ -1957,13 +2267,15 @@ async function addToClub(ref, label) {
     input.value = '';
     const name = r.name || r.added?.name || 'The card';
     const id = String(r.added?.id || '');
-    setClubMsg(`${name} is in your club.`, 'ok');
+    setClubMsg(r.added?.waiting
+      ? `${name} is in your club. Full stats arrive once the library loads this card; until then they sit out of squads.`
+      : `${name} is in your club.`, 'ok');
     renderClubCount();
     await renderClubList();
     if (SQ.open) renderSquad();
     (id && document.querySelector(`#clubList [data-fk="row-${CSS.escape(id)}"]`) || input).focus();
   } catch (e) {
-    setClubMsg(e.message, 'error', e);
+    setClubMsg(e.message, 'error');
     input.focus();
   } finally {
     btn.disabled = false;
@@ -1999,7 +2311,7 @@ async function searchClub(q, focusFirst = false) {
     ul.hidden = false;
     if (focusFirst) ul.querySelector('button:not([disabled])')?.focus();
   } catch (e) {
-    if (e.name !== 'AbortError') setClubMsg(e.message, 'error', e);
+    if (e.name !== 'AbortError') setClubMsg(e.message, 'error');
   }
 }
 
@@ -2040,6 +2352,7 @@ async function suggestXI() {
     d.slots = slots;
     d.bench = r.ids.bench.map(String);
     d.tactic = r.tactic || d.tactic;
+    d.defSlots = d.fluid ? (r.def?.ids || null) : null;
     SQ.undo = same ? null : before;
     SQ.result = r;
     SQ.placing = new Set(changed);
@@ -2052,7 +2365,7 @@ async function suggestXI() {
     if (r.versionsSkipped) notes.push(`${r.versionsSkipped} extra version${r.versionsSkipped > 1 ? 's' : ''} of the same player stayed out, since a squad takes one of each.`);
     if (notes.length) toast(notes.join(' '), 'info');
   } catch (e) {
-    if (e.name !== 'AbortError') toast(e.message, 'error', requestLink(e));
+    if (e.name !== 'AbortError') toast(e.message, 'error');
   } finally {
     btn.disabled = false;
     btn.textContent = label;
@@ -2145,7 +2458,10 @@ async function saveSquad(e) {
     d.name = name;
     const r = await api('/api/squads', {
       method: 'POST',
-      body: { id: d.id || undefined, name, formation: d.formation, managerId: d.managerId, tactic: d.tactic, slots: d.slots, bench: d.bench },
+      body: {
+        id: d.id || undefined, name, formation: d.formation, managerId: d.managerId, tactic: d.tactic, slots: d.slots, bench: d.bench,
+        fluid: !!(d.fluid && d.defFormation), defFormation: d.fluid ? d.defFormation : null, defSlots: d.fluid ? d.defSlots : null,
+      },
     });
     SQ.squads = r.squads || [];
     d.id = String(r.saved.id);
@@ -2175,7 +2491,7 @@ async function deleteSquad() {
     $('#sqSaved').focus();
     toast(`Deleted “${name}”. The players stay on the pitch as a draft.`, 'info');
   } catch (e) {
-    toast(e.message, 'error', requestLink(e));
+    toast(e.message, 'error');
   }
 }
 
@@ -2213,6 +2529,18 @@ function wireSquad() {
     changeFormation(e.target.value);
   });
   $('#sqCustomForm').addEventListener('submit', applyCustomForm);
+  $('#sqFluid').addEventListener('change', e => { if (SQ.draft) setFluid(e.target.checked); });
+  $('#sqDefFormation').addEventListener('change', e => { if (SQ.draft) setDefFormation(e.target.value); });
+  $('#sqPhase').addEventListener('click', e => {
+    const b = e.target.closest('[data-phase]');
+    if (b && SQ.draft) setPhase(b.dataset.phase);
+  });
+  $('#sqPhase').addEventListener('keydown', e => {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key) || !SQ.draft) return;
+    e.preventDefault();
+    const next = e.key === 'Home' ? 'att' : e.key === 'End' ? 'def' : SQ.phase === 'att' ? 'def' : 'att';
+    setPhase(next, true);
+  });
   $('#sqCustomCancel').addEventListener('click', closeCustomForm);
   $('#sqCustomForm').addEventListener('keydown', e => { if (e.key === 'Escape') { e.preventDefault(); closeCustomForm(); } });
   $('#sqCustomInput').addEventListener('input', e => {
@@ -2389,7 +2717,7 @@ async function boot() {
     await loadManagers();
     setupCustomForm();
   } catch (e) {
-    toast(e.message, 'error', requestLink(e));
+    toast(e.message, 'error');
   }
   if (!mgr(S.managerId) || mgr(S.managerId).missing) S.managerId = firstUsable()?.id || null;
   if (S.managerId && !S.tactics.some(t => t.key === S.tactic)) S.tactic = mgr(S.managerId).bestTactic;
@@ -2398,7 +2726,7 @@ async function boot() {
   if (S.v !== 'squad') showView(first);
   if (S.playerId) build({ newPlayer: true });
   else renderEmpty();
-  try { await loadSquadData(); } catch (e) { SQ.failed = true; toast(e.message, 'error', requestLink(e)); }
+  try { await loadSquadData(); } catch (e) { SQ.failed = true; toast(e.message, 'error'); }
   if (S.v === 'squad') showView(SQ.draft ? 'squad' : first);
   else if (document.body.dataset.view === 'home') renderHomeSquad();
 }

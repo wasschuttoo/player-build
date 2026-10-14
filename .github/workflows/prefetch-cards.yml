@@ -1,0 +1,82 @@
+name: Prefetch cards
+
+# Backfills Build Album with every efhub card, popular types and highest OVR
+# first, at efhub's robots.txt pace (one card every 5 s). Runs back to back
+# (hourly trigger, queued behind the running job) and redeploys the site every
+# 30 minutes, so the live library grows on its own. A full library takes about
+# three days; after that each run only picks up newly released cards.
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: Max new cards this run ("all" for no limit)
+        default: 'all'
+      minOvr:
+        description: Only cards at or above this OVR
+        default: '0'
+      delayMs:
+        description: Milliseconds between card requests (efhub asks for at least 5000)
+        default: '5000'
+
+permissions:
+  contents: write
+  actions: write
+
+# Separate from "pages" so a long backfill never blocks normal deploys.
+# Only one crawl runs at a time; the next hourly trigger waits in the queue.
+concurrency:
+  group: prefetch-cards
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Fetch cards from efhub, commit and redeploy every chunk
+        env:
+          LIMIT: ${{ github.event.inputs.limit || 'all' }}
+          MIN_OVR: ${{ github.event.inputs.minOvr || '0' }}
+          DELAY_MS: ${{ github.event.inputs.delayMs || '5000' }}
+          BUDGET_MINUTES: '330'
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          start=$(date +%s); total=0; failed=0
+          limit="$LIMIT"
+          while :; do
+            left=$(( (start + BUDGET_MINUTES * 60 - $(date +%s)) / 60 ))
+            [ "$left" -lt 5 ] && { echo "Time budget used up."; break; }
+            chunk=$(( left < 30 ? left : 30 ))
+            status=$(mktemp)
+            LIMIT="$limit" MINUTES="$chunk" PREFETCH_STATUS="$status" node scripts/prefetch.js || failed=1
+            added=$(grep '^added=' "$status" | tail -1 | cut -d= -f2 || true); added=${added:-0}
+            remaining=$(grep '^remaining=' "$status" | tail -1 | cut -d= -f2 || true); remaining=${remaining:-0}
+            rm -f "$status"
+
+            git add public/data/cards
+            if ! git diff --cached --quiet; then
+              n=$(git diff --cached --name-only | grep -c '/[0-9]*\.json$' || true)
+              git commit -q -m "Card backfill ($n cards)"
+              pushed=false
+              for i in 1 2 3; do git pull -q --rebase && git push -q && { pushed=true; break; }; sleep 10; done
+              # Pushes made with GITHUB_TOKEN don't trigger pages.yml on their own; a dispatch does.
+              [ "$pushed" = true ] && { gh workflow run pages.yml --ref main || echo "Couldn't start a Pages deploy."; }
+            fi
+
+            total=$((total + added))
+            echo "Chunk added $added cards ($total this run), $remaining still missing."
+            [ "$failed" = 1 ] || [ "$added" = 0 ] || [ "$remaining" = 0 ] && break
+            if [[ "$limit" =~ ^[0-9]+$ ]]; then
+              limit=$((limit - added)); [ "$limit" -le 0 ] && break
+            fi
+          done
+          if [ "$failed" = 1 ] && [ "$total" = 0 ]; then exit 1; fi

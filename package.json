@@ -4,7 +4,7 @@
   "private": true,
   "description": "Plan eFootball player training builds around your managers and playstyles.",
   "scripts": {
-    "start": "node server.js"
+    "start": "node --use-system-ca scripts/serve.js"
   },
   "engines": {
     "node": ">=24"
