@@ -2,12 +2,19 @@ name: Prefetch cards
 
 # Backfills Build Album with every efhub card, popular types and highest OVR
 # first, at efhub's robots.txt pace (one card every 5 s). Runs back to back
-# (hourly trigger, queued behind the running job) and redeploys the site every
-# 30 minutes, so the live library grows on its own. A full library takes about
+# (hourly trigger, queued behind the running job). While the crawler runs, new
+# cards are committed and pushed every minute, and the site reads them straight
+# from the repo, so a card is usable within a few minutes of being fetched.
+# Pages itself redeploys at most every 15 minutes. A full library takes about
 # three days; after that each run only picks up newly released cards.
+#
+# New cards: every chunk re-reads efhub's index and compares it with
+# data/seen-ids.txt, so cards that weren't there before jump the queue. On
+# Thursdays (eFootball's weekly drop) it also checks every 15 minutes.
 on:
   schedule:
     - cron: '17 * * * *'
+    - cron: '*/15 0-14 * * 4'
   workflow_dispatch:
     inputs:
       limit:
@@ -40,37 +47,77 @@ jobs:
         with:
           node-version: 24
 
-      - name: Fetch cards from efhub, commit and redeploy every chunk
+      - name: Fetch cards from efhub, pushing them every minute
         env:
           LIMIT: ${{ github.event.inputs.limit || 'all' }}
           MIN_OVR: ${{ github.event.inputs.minOvr || '0' }}
           DELAY_MS: ${{ github.event.inputs.delayMs || '5000' }}
           BUDGET_MINUTES: '330'
+          DEPLOY_EVERY: '900'
           GH_TOKEN: ${{ github.token }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           start=$(date +%s); total=0; failed=0
           limit="$LIMIT"
+          pending=0; last_deploy=0
+
+          # Commit whatever the crawler has written so far straight on top of origin/main and
+          # push it. A throwaway index keeps the checkout untouched while the crawler writes to it.
+          push_cards() {
+            local files idx tree msg changed fresh commit
+            files=$(git ls-files -m -o --exclude-standard -- public/data/cards data/seen-ids.txt | grep -v '\.tmp$' || true)
+            [ -n "$files" ] || return 0
+            git fetch -q origin +refs/heads/main:refs/remotes/origin/main || { echo "Fetch failed; will retry."; return 1; }
+            idx=$(mktemp -u)
+            if ! { GIT_INDEX_FILE="$idx" git read-tree origin/main &&
+                   printf '%s\n' "$files" | GIT_INDEX_FILE="$idx" git update-index --add --remove --stdin &&
+                   tree=$(GIT_INDEX_FILE="$idx" git write-tree); }; then
+              rm -f "$idx"; echo "Couldn't build a commit; will retry."; return 1
+            fi
+            rm -f "$idx"
+            [ "$tree" = "$(git rev-parse 'origin/main^{tree}')" ] && return 0
+            changed=$(git diff --name-only origin/main "$tree" -- public/data/cards | wc -l)
+            fresh=$(git diff --name-only --diff-filter=A origin/main "$tree" -- public/data/cards | grep -c '/[0-9]*\.json$' || true)
+            if [ "$fresh" != 0 ]; then msg="Add $fresh efhub cards"
+            elif [ "$changed" != 0 ]; then msg="Update efhub card library"
+            else msg="Track new efhub cards"; fi
+            commit=$(git commit-tree "$tree" -p origin/main -m "$msg")
+            if git push -q origin "$commit:refs/heads/main"; then
+              [ "$changed" != 0 ] && pending=1
+              echo "$msg"
+              return 0
+            fi
+            echo "Push failed (main moved); will retry."
+            return 1
+          }
+
+          # Pushes made with GITHUB_TOKEN don't trigger pages.yml on their own; a dispatch does.
+          deploy() {
+            [ "$pending" = 1 ] || return 0
+            [ "$1" = now ] || [ $(( $(date +%s) - last_deploy )) -ge "$DEPLOY_EVERY" ] || return 0
+            if gh workflow run pages.yml --ref main; then pending=0; last_deploy=$(date +%s); else echo "Couldn't start a Pages deploy."; fi
+          }
+
           while :; do
             left=$(( (start + BUDGET_MINUTES * 60 - $(date +%s)) / 60 ))
             [ "$left" -lt 5 ] && { echo "Time budget used up."; break; }
             chunk=$(( left < 30 ? left : 30 ))
             status=$(mktemp)
-            LIMIT="$limit" MINUTES="$chunk" PREFETCH_STATUS="$status" node scripts/prefetch.js || failed=1
+            LIMIT="$limit" MINUTES="$chunk" PREFETCH_STATUS="$status" node scripts/prefetch.js &
+            crawler=$!
+            while kill -0 "$crawler" 2>/dev/null; do
+              for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+                sleep 5; kill -0 "$crawler" 2>/dev/null || break
+              done
+              push_cards || true; deploy
+            done
+            wait "$crawler" || failed=1
+            for _ in 1 2 3 4 5; do push_cards && break; sleep 10; done
+            deploy now
             added=$(grep '^added=' "$status" | tail -1 | cut -d= -f2 || true); added=${added:-0}
             remaining=$(grep '^remaining=' "$status" | tail -1 | cut -d= -f2 || true); remaining=${remaining:-0}
             rm -f "$status"
-
-            git add public/data/cards
-            if ! git diff --cached --quiet; then
-              n=$(git diff --cached --name-only | grep -c '/[0-9]*\.json$' || true)
-              git commit -q -m "Card backfill ($n cards)"
-              pushed=false
-              for i in 1 2 3; do git pull -q --rebase && git push -q && { pushed=true; break; }; sleep 10; done
-              # Pushes made with GITHUB_TOKEN don't trigger pages.yml on their own; a dispatch does.
-              [ "$pushed" = true ] && { gh workflow run pages.yml --ref main || echo "Couldn't start a Pages deploy."; }
-            fi
 
             total=$((total + added))
             echo "Chunk added $added cards ($total this run), $remaining still missing."

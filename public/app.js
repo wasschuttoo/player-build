@@ -571,7 +571,7 @@ async function renderWaiting(err) {
   const slot = h('div', { class: 'slot slot-waiting', role: 'status' },
     h('span', { class: 'r-tag r-tag-quiet', text: 'Adding automatically' }),
     name,
-    h('p', { class: 'slot-note', text: 'Build Album pulls in new efhub cards on its own every half hour, popular types first. Add it to your club now and its builds unlock as soon as it lands.' }),
+    h('p', { class: 'slot-note', text: 'Build Album pulls in new efhub cards on its own, new and popular ones first, and they go live within minutes. Add it to your club now and its builds unlock as soon as it lands.' }),
     h('div', { class: 'slot-actions' }, add, another),
     status);
   $('#playerSlot').replaceChildren(slot);

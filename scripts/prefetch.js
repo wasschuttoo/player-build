@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 'use strict';
-// Backfills the static card library with every efhub card: Epic, Big Time, Highlight, Show Time
-// and Trending first, then other featured cards, then standard ones (highest OVR first in each).
+// Backfills the static card library with every efhub card: newly released cards (the Thursday
+// drops) first, then Epic, Big Time, Highlight, Show Time and Trending, then other featured cards,
+// then standard ones (highest OVR first in each).
 //   node scripts/prefetch.js [--limit all] [--min-ovr 0] [--minutes 50] [--delay 5000]
 // Env vars LIMIT, MIN_OVR, MINUTES and DELAY_MS work too (flags win). The default
 // delay follows efhub's robots.txt Crawl-delay of 5 seconds.
 // If PREFETCH_STATUS names a file, "added=N" and "remaining=N" are appended to it
-// so the workflow can commit in chunks and decide whether to keep going.
+// so the workflow can decide whether to keep going. The workflow commits and pushes the
+// library every minute while this runs, so files are written atomically after every card.
 const fs = require('fs');
 const path = require('path');
 const { BASE_URL, UA } = require('../efhub_builder.js');
-const { save, fetchCard, readIndex, writeIndex, OUT } = require('./fetch-card.js');
+const { save, fetchCard, readIndex, writeIndex, writeAtomic, OUT } = require('./fetch-card.js');
 
 const SKIP = path.join(OUT, 'skip.json');
+const SEEN = path.join(__dirname, '..', 'data', 'seen-ids.txt');
 const SKIP_DAYS = 14;
 const MAX_CONSECUTIVE_FAILURES = 25;
 
@@ -47,10 +50,29 @@ function readSkip() {
 function writeSkip(skip) {
   const ids = Object.keys(skip).sort();
   if (!ids.length) { fs.rmSync(SKIP, { force: true }); return; }
-  fs.writeFileSync(SKIP, `{\n${ids.map(id => `${JSON.stringify(id)}:${JSON.stringify(skip[id])}`).join(',\n')}\n}\n`);
+  writeAtomic(SKIP, `{\n${ids.map(id => `${JSON.stringify(id)}:${JSON.stringify(skip[id])}`).join(',\n')}\n}\n`);
 }
 
-// Crawl order: the cards people actually play with come first. efhub ids carry the card type in
+// Every id ever seen in efhub's index, with the day it first appeared (a bare id is part of the
+// original baseline). efhub's index carries no release dates, so this is how the weekly Thursday
+// drops get spotted: anything not seen before jumps to the front of the queue, newest first.
+function readSeen() {
+  const seen = new Map();
+  let text = '';
+  try { text = fs.readFileSync(SEEN, 'utf8'); } catch {}
+  for (const line of text.split('\n')) {
+    const [id, day = ''] = line.trim().split(/\s+/);
+    if (id) seen.set(id, day);
+  }
+  return seen;
+}
+function writeSeen(seen) {
+  fs.mkdirSync(path.dirname(SEEN), { recursive: true });
+  const ids = [...seen.keys()].sort();
+  writeAtomic(SEEN, ids.map(id => (seen.get(id) ? `${id} ${seen.get(id)}` : id)).join('\n') + '\n');
+}
+
+// Then the cards people actually play with come first. efhub ids carry the card type in
 // their prefix: 88 Epic, 89 Big Time, 105 Highlight, 106 Show Time, 52-56 Trending/POTW.
 // Then every other featured card (13+ digit id), then standard cards. Within a tier, highest OVR
 // first, and players with more versions (the popular ones) break ties.
@@ -76,14 +98,28 @@ async function main() {
   for (const f of fs.readdirSync(OUT)) if (/^\d+\.json$/.test(f)) have.add(path.basename(f, '.json'));
 
   const all = (await playerIndex()).filter(p => p && p.i != null);
+  const seen = readSeen();
+  const baseline = !seen.size;
+  const today = new Date().toISOString().slice(0, 10);
+  let appeared = 0;
+  for (const p of all) {
+    const id = String(p.i);
+    if (!seen.has(id)) { seen.set(id, baseline ? '' : today); appeared++; }
+  }
+  if (appeared) writeSeen(seen);
+  if (appeared && !baseline) console.log(`${appeared} new cards on efhub since the last run; they go first.`);
+  const released = p => seen.get(String(p.i)) || '';
+  const recent = new Date(Date.now() - 3 * 864e5).toISOString().slice(0, 10);
+
   const versions = new Map();
   for (const p of all) versions.set(p.e, (versions.get(p.e) || 0) + 1);
   const wanted = all
     .filter(p => Number(p.o) < 120 && Number(p.o) >= o.minOvr && !have.has(String(p.i)) && !skip[String(p.i)])
-    .sort((a, b) => tier(a) - tier(b) || Number(b.o) - Number(a.o) || versions.get(b.e) - versions.get(a.e));
+    .sort((a, b) => released(b).localeCompare(released(a)) || tier(a) - tier(b) || Number(b.o) - Number(a.o) || versions.get(b.e) - versions.get(a.e));
   const queue = wanted.slice(0, o.limit);
   const featured = wanted.filter(p => tier(p) === 0).length;
-  console.log(`Library has ${have.size} cards, ${Object.keys(skip).length} parked; ${wanted.length} missing (${featured} featured), queued ${queue.length} (limit ${o.limit}, min OVR ${o.minOvr}, ${o.delay} ms apart).`);
+  const fresh = wanted.filter(released).length;
+  console.log(`Library has ${have.size} cards, ${Object.keys(skip).length} parked; ${wanted.length} missing (${fresh} newly released, ${featured} featured), queued ${queue.length} (limit ${o.limit}, min OVR ${o.minOvr}, ${o.delay} ms apart).`);
 
   let added = 0, failed = 0, parked = 0, streak = 0, done = 0, backoff = 0, sinceFlush = 0;
   for (const p of queue) {
@@ -104,14 +140,18 @@ async function main() {
           await sleep(backoff);
           continue;
         }
-        if (err.permanent) { skip[id] = new Date().toISOString().slice(0, 10); parked++; }
+        // A just-released card's efhub page is often incomplete for a while; try it again next run.
+        const notReady = err.permanent && released(p) >= recent;
+        if (notReady) failed++;
+        else if (err.permanent) { skip[id] = new Date().toISOString().slice(0, 10); parked++; }
         else { failed++; streak++; }
-        console.log(`! ${id}\t${p.e}: ${err.message}${err.permanent ? ' (parked)' : ''}`);
+        console.log(`! ${id}\t${p.e}: ${err.message}${notReady ? ' (new card, retrying next run)' : err.permanent ? ' (parked)' : ''}`);
         break;
       }
     }
     done++;
-    if (sinceFlush >= 50) { writeIndex(index); writeSkip(skip); sinceFlush = 0; }
+    // Keep index.json current after every card: the workflow pushes the library every minute while this runs.
+    if (sinceFlush) { writeIndex(index); writeSkip(skip); sinceFlush = 0; }
     if (streak >= MAX_CONSECUTIVE_FAILURES) {
       console.log(`${streak} failures in a row; efhub may be limiting us. Stopping this run.`);
       break;

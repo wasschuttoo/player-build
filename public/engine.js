@@ -1,8 +1,8 @@
 'use strict';
 // Build Album in-browser engine: the same /api/* maths as server.js, run on the page so the app can live on
 // GitHub Pages with no server. efhub's managers, boosts and player index allow cross-origin reads, so they're
-// fetched straight from efhub. Player pages don't, so cards come from data/cards/ in this repo, which a 6-hourly
-// GitHub Action ("Prefetch cards") backfills with every efhub card, highest OVR first.
+// fetched straight from efhub. Player pages don't, so cards come from data/cards/ in this repo, which a GitHub
+// Action ("Prefetch cards") backfills with every efhub card, new and popular cards first, pushing every minute.
 (function () {
   const meta = document.querySelector('meta[name="ba-mode"]');
   if (meta && meta.content === 'server') return;
@@ -97,20 +97,28 @@
     }
     return libIndex;
   }
+  // Pages redeploys every ~15 minutes, but the crawler pushes cards every minute, so a card missing from the
+  // deployed site is looked up in the repo itself before it's reported as still loading.
+  const RAW = 'https://raw.githubusercontent.com/wasschuttoo/player-build/main/public/data/cards/';
+  async function readCard(res, id) {
+    if (!res || !res.ok) return null;
+    try {
+      const c = await withTimeout(res.json(), NET_MS);
+      if (!c || !c.baseStats || B.POSITION_COLUMN[c.position] === undefined) return null;
+      c.id = String(id);
+      return c;
+    } catch { return null; }
+  }
   async function libCard(id, refresh) {
     if (!refresh && libCards.has(id)) return libCards.get(id);
     let res;
     try { res = await timedFetch(new URL(`data/cards/${id}.json`, base()), { cache: refresh ? 'reload' : 'no-cache' }); } catch {
       throw new UserError("Couldn't reach Build Album's card library. Check your connection, then try again.", 503);
     }
-    if (!res.ok) return null;
-    try {
-      const c = await withTimeout(res.json(), NET_MS);
-      if (!c || !c.baseStats || B.POSITION_COLUMN[c.position] === undefined) return null;
-      c.id = String(id);
-      libCards.set(id, c);
-      return c;
-    } catch { return null; }
+    let c = await readCard(res, id);
+    if (!c && /^\d+$/.test(id)) c = await readCard(await timedFetch(`${RAW}${id}.json`).catch(() => null), id);
+    if (c) libCards.set(id, c);
+    return c;
   }
 
   // ---------------------------------------------------------------- helpers (ported from server.js)

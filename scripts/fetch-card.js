@@ -12,6 +12,13 @@ const INDEX = path.join(OUT, 'index.json');
 
 const readIndex = () => { try { return JSON.parse(fs.readFileSync(INDEX, 'utf8')); } catch { return []; } };
 
+// Write then rename, so a git commit running alongside the crawl never picks up a half-written file.
+function writeAtomic(file, text) {
+  const tmp = `${file}.tmp`;
+  fs.writeFileSync(tmp, text);
+  fs.renameSync(tmp, file);
+}
+
 // Errors that retrying won't fix (the card itself is unusable).
 const unusable = msg => Object.assign(new Error(msg), { permanent: true });
 
@@ -29,7 +36,7 @@ function slotOf(index, id) {
 function save(card, index) {
   if (!card?.baseStats || !card.id) throw unusable('Card has no stats');
   if (POSITION_COLUMN[card.position] === undefined) throw unusable(`Card has unknown position "${card.position}"`);
-  fs.writeFileSync(path.join(OUT, `${card.id}.json`), JSON.stringify(card));
+  writeAtomic(path.join(OUT, `${card.id}.json`), JSON.stringify(card));
   const entry = { id: card.id, name: card.name, team: card.team, position: card.position, type: CARD_TYPES[card.playerType] || String(card.playerType ?? '') };
   const map = slotOf(index, card.id);
   const i = map.get(String(card.id));
@@ -74,9 +81,9 @@ async function main(args) {
 function writeIndex(index) {
   index.sort((a, b) => String(a.name).localeCompare(String(b.name)));
   positions.delete(index);
-  fs.writeFileSync(INDEX, `[\n${index.map(e => JSON.stringify(e)).join(',\n')}\n]\n`);
+  writeAtomic(INDEX, `[\n${index.map(e => JSON.stringify(e)).join(',\n')}\n]\n`);
 }
 
-module.exports = { save, fetchCard, readIndex, writeIndex, OUT, INDEX };
+module.exports = { save, fetchCard, readIndex, writeIndex, writeAtomic, OUT, INDEX };
 
 if (require.main === module) main(process.argv.slice(2)).catch(e => { console.error(`error: ${e.message}`); process.exit(1); });
